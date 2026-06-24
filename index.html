@@ -264,7 +264,7 @@ const DB = (() => {
       const t = db.transaction("files", mode);
       const store = t.objectStore("files");
       const out = fn(store);
-      t.oncomplete = () => res(out.result ?? out);
+      t.oncomplete = () => res(out.result !== undefined ? out.result : null);
       t.onerror = () => rej(t.error);
     });
   }
@@ -700,7 +700,7 @@ function confirmWrite(name, prev) {
     card.innerHTML =
       `<div class="title">Claude wants to ${verb}: ${escapeHTML(prev.path)}</div>`
       + `<div class="meta">${name} · ${prev.before == null ? "new file" : prev.before.length + " → " + prev.after.length + " chars"}</div>`
-      + `<div class="diff">${renderDiff(prev.before, prev.after)}</div>`
+      + `<div class="diff">${(() => { try { return renderDiff(prev.before, prev.after); } catch(e) { return `<tr><td class="code">diff error: ${escapeHTML(e.message)}</td></tr>`; } })()}</div>`
       + `<div class="actions"><button class="ok">apply</button><button class="no">reject</button></div>`;
     log.appendChild(card);
     log.scrollTop = log.scrollHeight;
@@ -712,6 +712,7 @@ function confirmWrite(name, prev) {
 
 /* execute a tool call: preview, confirm (unless auto), write. returns a tool_result string */
 async function executeTool(name, input) {
+  try {
   const prev = await previewTool(name, input);
   if (prev.error) return `Error: ${prev.error}`;
 
@@ -724,6 +725,10 @@ async function executeTool(name, input) {
   await DB.put(prev.path, prev.after);
   await refreshStat();
   return `Success: ${prev.path} now has ${prev.after.length} characters.`;
+  } catch (e) {
+    print(`tool execution error: ${e.message}`, "err");
+    return `Error executing ${name}: ${e.message}`;
+  }
 }
 
 /* ---------- conversation memory ---------- */
