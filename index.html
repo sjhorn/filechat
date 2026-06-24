@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>filechat — talk to your files</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #11161d;
+    --line: #1f2630;
+    --ink: #c9d4e0;
+    --dim: #6b7785;
+    --accent: #7ee787;
+    --accent-dim: #3f8a4a;
+    --user: #79c0ff;
+    --warn: #ffa657;
+    --err: #ff7b72;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .brand { color: var(--accent); font-weight: 600; letter-spacing: .5px; }
+  .brand::before { content: "▍"; color: var(--accent-dim); margin-right: 4px; }
+  .stat { color: var(--dim); font-size: 12px; }
+  .grow { flex: 1; }
+  header button {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  header button:hover { border-color: var(--accent-dim); color: var(--ink); }
+  header button:focus-visible { outline: 2px solid var(--user); outline-offset: 1px; }
+
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .row { margin: 0 0 10px; }
+  .prompt { color: var(--accent); }
+  .you { color: var(--user); }
+  .you::before { content: "you › "; color: var(--accent); }
+  .sys { color: var(--dim); }
+  .err { color: var(--err); }
+  .warn { color: var(--warn); }
+  .ai { color: var(--ink); }
+  .ai::before { content: "claude › "; color: var(--accent); }
+
+  /* rendered markdown */
+  .md { white-space: normal; }
+  .md.ai::before { display: block; margin-bottom: 4px; }
+  .md .md-p { margin: 0 0 8px; white-space: pre-wrap; }
+  .md .md-p:last-child { margin-bottom: 0; }
+  .md .md-h { color: var(--user); margin: 12px 0 6px; line-height: 1.3; }
+  .md h1.md-h { font-size: 1.35em; } .md h2.md-h { font-size: 1.2em; }
+  .md h3.md-h { font-size: 1.08em; } .md h4.md-h, .md h5.md-h, .md h6.md-h { font-size: 1em; }
+  .md .md-list { margin: 0 0 8px; padding-left: 22px; }
+  .md .md-list li { margin: 2px 0; }
+  .md strong { color: #e6edf3; font-weight: 600; }
+  .md em { font-style: italic; }
+  .md code.inline {
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 5px; font-size: .92em; color: var(--accent);
+  }
+  .md pre.code {
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px 12px; margin: 0 0 8px;
+    overflow-x: auto; white-space: pre;
+  }
+  .md pre.code code { color: var(--ink); font-size: .92em; }
+  .md blockquote {
+    border-left: 3px solid var(--accent-dim); margin: 0 0 8px;
+    padding: 2px 0 2px 12px; color: var(--dim);
+  }
+  .file-list { color: var(--ink); }
+  .file-list b { color: var(--user); font-weight: 600; }
+  .thinking { color: var(--dim); font-style: italic; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 10px 16px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  #input {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13.5px;
+    padding: 9px 12px;
+    border-radius: 6px;
+  }
+  #input:focus { outline: none; border-color: var(--accent-dim); }
+  #input::placeholder { color: var(--dim); }
+  .hint { color: var(--dim); font-size: 11.5px; padding: 0 16px 8px; }
+
+  /* write confirmation card */
+  .confirm {
+    border: 1px solid var(--accent-dim);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 0 0 10px;
+    background: var(--panel);
+  }
+  .confirm .title { color: var(--accent); margin-bottom: 6px; }
+  .confirm .meta { color: var(--dim); font-size: 12px; margin-bottom: 8px; }
+  .diff { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; max-height: 240px; overflow-y: auto; border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+  .diff .add { color: var(--accent); }
+  .diff .del { color: var(--err); text-decoration: line-through; opacity: .8; }
+  .confirm .actions { margin-top: 10px; display: flex; gap: 8px; }
+  .confirm button {
+    font-family: var(--mono); font-size: 12px; padding: 5px 12px;
+    border-radius: 5px; cursor: pointer; border: 1px solid var(--line);
+    background: transparent; color: var(--ink);
+  }
+  .confirm button.ok { border-color: var(--accent-dim); color: var(--accent); }
+  .confirm button.no { border-color: var(--err); color: var(--err); }
+  .confirm button:focus-visible { outline: 2px solid var(--user); outline-offset: 1px; }
+
+  /* drag overlay */
+  #drop {
+    position: fixed; inset: 0;
+    background: rgba(13,17,23,.92);
+    border: 2px dashed var(--accent-dim);
+    display: none;
+    align-items: center; justify-content: center;
+    color: var(--accent); font-size: 18px;
+    z-index: 50;
+  }
+  #drop.on { display: flex; }
+  a { color: var(--user); }
+</style>
+</head>
+<body>
+  <header>
+    <span class="brand">filechat</span>
+    <span class="stat" id="fileStat">0 files</span>
+    <span class="grow"></span>
+    <button id="addBtn">+ add files</button>
+    <button id="autoBtn" title="when on, Claude's edits apply without asking">confirm edits: on</button>
+    <button id="tokenBtn">set token</button>
+    <button id="wipeBtn">clear all</button>
+    <input type="file" id="picker" multiple hidden>
+  </header>
+
+  <div id="log" aria-live="polite"></div>
+
+  <div class="hint">commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask Claude to edit a file</div>
+
+  <footer>
+    <input id="input" autocomplete="off" placeholder="ask a question, or type a command…" autofocus>
+  </footer>
+
+  <div id="drop">drop files to add them</div>
+
+<script>
+/* ---------- config ---------- */
+// Anthropic API base. Point this at your proxy (which can hold the real key
+// server-side) or directly at https://api.anthropic.com for bring-your-own-key.
+const API_BASE = "https://vibe-proxy.westeurope.dev.maersk.io";
+const API_URL = API_BASE.replace(/\/$/, "") + "/v1/messages";
+
+/* ---------- tiny IndexedDB wrapper (stores path -> text) ---------- */
+const DB = (() => {
+  let dbp;
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const r = indexedDB.open("filechat", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("files");
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  async function tx(mode, fn) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction("files", mode);
+      const store = t.objectStore("files");
+      const out = fn(store);
+      t.oncomplete = () => res(out.result ?? out);
+      t.onerror = () => rej(t.error);
+    });
+  }
+  return {
+    put: (k, v) => tx("readwrite", s => s.put(v, k)),
+    get: (k) => tx("readonly", s => s.get(k)),
+    del: (k) => tx("readwrite", s => s.delete(k)),
+    keys: () => tx("readonly", s => s.getAllKeys()),
+    clear: () => tx("readwrite", s => s.clear()),
+  };
+})();
+
+/* ---------- token storage (localStorage, prompted once) ---------- */
+function getToken(force) {
+  let t = localStorage.getItem("apiToken");
+  if (!t || force) {
+    t = prompt("Enter your gateway bearer token (stored only in this browser):", t || "");
+    if (t) localStorage.setItem("apiToken", t.trim());
+  }
+  return localStorage.getItem("apiToken");
+}
+
+/* ---------- log helpers ---------- */
+const log = document.getElementById("log");
+function print(text, cls="sys") {
+  const d = document.createElement("div");
+  d.className = "row " + cls;
+  d.textContent = text;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+function printHTML(html, cls="sys") {
+  const d = document.createElement("div");
+  d.className = "row " + cls;
+  d.innerHTML = html;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+/* ---------- file ingestion ---------- */
+async function addFiles(fileList) {
+  for (const f of fileList) {
+    const lower = f.name.toLowerCase();
+    if (!/\.(txt|md|markdown|csv|json|js|ts|py|html|css|log|xml|yaml|yml|tsv)$/.test(lower)) {
+      print(`skipped ${f.name} — only text-based files can be read in the browser`, "warn");
+      continue;
+    }
+    try {
+      const text = await f.text();
+      await DB.put(f.name, text);
+      print(`added ${f.name} (${text.length.toLocaleString()} chars)`, "sys");
+    } catch (e) {
+      print(`failed to read ${f.name}: ${e.message}`, "err");
+    }
+  }
+  await refreshStat();
+}
+
+async function refreshStat() {
+  const keys = await DB.keys();
+  document.getElementById("fileStat").textContent =
+    `${keys.length} file${keys.length === 1 ? "" : "s"}`;
+}
+
+/* ---------- commands ---------- */
+async function runCommand(raw) {
+  const [cmd, ...rest] = raw.trim().split(/\s+/);
+  const arg = rest.join(" ");
+  const keys = await DB.keys();
+
+  switch (cmd) {
+    case "help":
+      print(
+`ls               list stored files
+cat <file>       print a file's contents
+search <term>    find a term across all files (case-insensitive)
+rm <file>        remove a file
+help             this message
+
+Anything that isn't a command is sent to Claude as a question,
+with the contents of your files included as context.`, "sys");
+      return;
+
+    case "ls":
+      if (!keys.length) { print("no files yet — drag some in or hit '+ add files'", "sys"); return; }
+      printHTML(keys.map(k => `<b>${escapeHTML(k)}</b>`).join("\n"), "file-list");
+      return;
+
+    case "cat": {
+      if (!arg) { print("usage: cat <file>", "warn"); return; }
+      const v = await DB.get(arg);
+      if (v == null) { print(`no such file: ${arg}`, "err"); return; }
+      print(v, "ai");
+      return;
+    }
+
+    case "rm": {
+      if (!arg) { print("usage: rm <file>", "warn"); return; }
+      const v = await DB.get(arg);
+      if (v == null) { print(`no such file: ${arg}`, "err"); return; }
+      await DB.del(arg);
+      print(`removed ${arg}`, "sys");
+      await refreshStat();
+      return;
+    }
+
+    case "search": {
+      if (!arg) { print("usage: search <term>", "warn"); return; }
+      const term = arg.toLowerCase();
+      let hits = 0;
+      for (const k of keys) {
+        const text = await DB.get(k);
+        const lines = text.split("\n");
+        lines.forEach((line, i) => {
+          if (line.toLowerCase().includes(term)) {
+            hits++;
+            printHTML(`<b>${escapeHTML(k)}</b>:${i + 1}  ${highlight(line, arg)}`, "file-list");
+          }
+        });
+      }
+      if (!hits) print(`no matches for "${arg}"`, "sys");
+      return;
+    }
+
+    default:
+      // not a command → treat as a question for Claude
+      await askClaude(raw);
+  }
+}
+
+function escapeHTML(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+
+/* ---------- minimal, dependency-free markdown renderer ----------
+   Escapes HTML first (safe against echoed file content), then applies
+   block and inline rules. Covers what Claude typically emits. */
+function renderMarkdown(src) {
+  // 1. pull out fenced code blocks so their contents aren't further processed
+  const blocks = [];
+  src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const i = blocks.length;
+    blocks.push(`<pre class="code"><code>${escapeHTML(code.replace(/\n$/, ""))}</code></pre>`);
+    return `\u0000BLOCK${i}\u0000`;
+  });
+
+  // 2. escape everything else
+  src = escapeHTML(src);
+
+  // 3. inline spans (operate on escaped text)
+  const inline = (t) => t
+    .replace(/`([^`]+)`/g, '<code class="inline">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+    .replace(/\b_([^_]+)_\b/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  // 4. block-level pass, line by line
+  const lines = src.split("\n");
+  let html = "", listType = null;
+  const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
+
+  for (let raw of lines) {
+    const line = raw;
+    let m;
+    if (/^\u0000BLOCK\d+\u0000$/.test(line.trim())) { closeList(); html += line.trim(); continue; }
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      closeList(); const lvl = m[1].length;
+      html += `<h${lvl} class="md-h">${inline(m[2])}</h${lvl}>`; continue;
+    }
+    if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+      if (listType !== "ul") { closeList(); html += '<ul class="md-list">'; listType = "ul"; }
+      html += `<li>${inline(m[1])}</li>`; continue;
+    }
+    if ((m = line.match(/^\s*\d+\.\s+(.*)$/))) {
+      if (listType !== "ol") { closeList(); html += '<ol class="md-list">'; listType = "ol"; }
+      html += `<li>${inline(m[1])}</li>`; continue;
+    }
+    if ((m = line.match(/^\s*&gt;\s?(.*)$/))) {
+      closeList(); html += `<blockquote>${inline(m[1])}</blockquote>`; continue;
+    }
+    if (line.trim() === "") { closeList(); continue; }
+    closeList();
+    html += `<p class="md-p">${inline(line)}</p>`;
+  }
+  closeList();
+
+  // 5. restore code blocks
+  html = html.replace(/\u0000BLOCK(\d+)\u0000/g, (_, i) => blocks[+i]);
+  return html;
+}
+
+function printMarkdown(text) {
+  const d = document.createElement("div");
+  d.className = "row ai md";
+  d.innerHTML = renderMarkdown(text);
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+function highlight(line, term){
+  const e = escapeHTML(line);
+  const re = new RegExp("("+term.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig");
+  return e.replace(re,'<span style="color:var(--accent)">$1</span>');
+}
+
+/* ---------- tool definitions sent to the API ---------- */
+const TOOLS = [
+  {
+    name: "write_file",
+    description: "Create a new file or completely overwrite an existing one in the user's browser file store. Use for new files or full rewrites.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File name / path, e.g. notes.md" },
+        content: { type: "string", description: "The full new contents of the file" }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "str_replace",
+    description: "Make a targeted edit to an existing file by replacing an exact substring. old_str must appear exactly once in the file. Prefer this over write_file for small changes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File name / path of an existing file" },
+        old_str: { type: "string", description: "Exact text to replace (must occur exactly once)" },
+        new_str: { type: "string", description: "Replacement text" }
+      },
+      required: ["path", "old_str", "new_str"]
+    }
+  }
+];
+
+/* compute the new full content a tool call would produce, without writing */
+async function previewTool(name, input) {
+  if (name === "write_file") {
+    const before = await DB.get(input.path);
+    return { path: input.path, before: before ?? null, after: input.content };
+  }
+  if (name === "str_replace") {
+    const before = await DB.get(input.path);
+    if (before == null) return { error: `no such file: ${input.path}` };
+    const parts = before.split(input.old_str);
+    if (parts.length === 1) return { error: `old_str not found in ${input.path}` };
+    if (parts.length > 2) return { error: `old_str is not unique in ${input.path} (${parts.length - 1} matches)` };
+    return { path: input.path, before, after: before.replace(input.old_str, input.new_str) };
+  }
+  return { error: `unknown tool: ${name}` };
+}
+
+/* line-level diff preview (simple, good enough for review) */
+function renderDiff(before, after) {
+  const a = (before ?? "").split("\n");
+  const b = after.split("\n");
+  const max = Math.max(a.length, b.length);
+  let html = "";
+  for (let i = 0; i < max; i++) {
+    if (a[i] === b[i]) { html += `  ${escapeHTML(a[i] ?? "")}\n`; continue; }
+    if (a[i] !== undefined) html += `<span class="del">- ${escapeHTML(a[i])}</span>\n`;
+    if (b[i] !== undefined) html += `<span class="add">+ ${escapeHTML(b[i])}</span>\n`;
+  }
+  return html;
+}
+
+/* show a confirmation card; resolves true/false */
+function confirmWrite(name, prev) {
+  return new Promise(resolve => {
+    const card = document.createElement("div");
+    card.className = "row confirm";
+    const verb = prev.before == null ? "create" : "edit";
+    card.innerHTML =
+      `<div class="title">Claude wants to ${verb}: ${escapeHTML(prev.path)}</div>`
+      + `<div class="meta">${name} · ${prev.before == null ? "new file" : prev.before.length + " → " + prev.after.length + " chars"}</div>`
+      + `<div class="diff">${renderDiff(prev.before, prev.after)}</div>`
+      + `<div class="actions"><button class="ok">apply</button><button class="no">reject</button></div>`;
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+    card.querySelector(".ok").onclick = () => { card.querySelector(".actions").innerHTML = '<span class="sys">applied</span>'; resolve(true); };
+    card.querySelector(".no").onclick = () => { card.querySelector(".actions").innerHTML = '<span class="warn">rejected</span>'; resolve(false); };
+    card.querySelector(".ok").focus();
+  });
+}
+
+/* execute a tool call: preview, confirm (unless auto), write. returns a tool_result string */
+async function executeTool(name, input) {
+  const prev = await previewTool(name, input);
+  if (prev.error) return `Error: ${prev.error}`;
+
+  let approved = autoWrite;
+  if (!autoWrite) approved = await confirmWrite(name, prev);
+  else printHTML(`<span class="sys">auto-applied ${name} → <b>${escapeHTML(prev.path)}</b></span>`, "file-list");
+
+  if (!approved) return `The user rejected this edit to ${prev.path}. Do not retry it.`;
+
+  await DB.put(prev.path, prev.after);
+  await refreshStat();
+  return `Success: ${prev.path} now has ${prev.after.length} characters.`;
+}
+
+/* ---------- Claude call (agentic tool-use loop) ---------- */
+async function askClaude(question) {
+  const token = getToken();
+  if (!token) { print("no gateway token set — click 'set token'", "err"); return; }
+
+  const keys = await DB.keys();
+  let context = "";
+  for (const k of keys) {
+    const text = await DB.get(k);
+    context += `\n\n===== FILE: ${k} =====\n${text}`;
+  }
+  const MAX = 150_000;
+  if (context.length > MAX) {
+    context = context.slice(0, MAX);
+    print("note: files exceed context limit, truncating", "warn");
+  }
+
+  // running conversation for this request (so tool results can be sent back)
+  const messages = [{
+    role: "user",
+    content: context
+      ? `Here are my files:${context}\n\n---\n${question}`
+      : `(No files loaded.) ${question}`
+  }];
+
+  const system = "You are a helpful assistant working with the user's files in a browser-based store. "
+    + "Answer questions from the file contents, and cite file names when relevant. "
+    + "When the user asks you to change a file, use the write_file or str_replace tools — "
+    + "prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
+    + "Edits are applied to the user's local browser storage only.";
+
+  const MAX_TURNS = 6;
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    const thinking = print(turn === 0 ? "thinking…" : "working…", "thinking");
+    let data;
+    try {
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+      };
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1500,
+          system,
+          tools: TOOLS,
+          messages
+        })
+      });
+      data = await res.json();
+      thinking.remove();
+      if (!res.ok) {
+        print(`API error ${res.status}: ${data.error?.message || JSON.stringify(data)}`, "err");
+        if (res.status === 401) print("token rejected — click 'set token' to re-enter", "warn");
+        return;
+      }
+    } catch (e) {
+      thinking.remove();
+      print(`request failed: ${e.message}`, "err");
+      return;
+    }
+
+    // print any text the model produced this turn
+    const textOut = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+    if (textOut) printMarkdown(textOut);
+
+    // record the assistant turn verbatim (needed for the tool loop)
+    messages.push({ role: "assistant", content: data.content });
+
+    const toolCalls = (data.content || []).filter(b => b.type === "tool_use");
+    if (data.stop_reason !== "tool_use" || !toolCalls.length) return; // done
+
+    // execute each tool call and gather results
+    const results = [];
+    for (const call of toolCalls) {
+      const result = await executeTool(call.name, call.input);
+      results.push({ type: "tool_result", tool_use_id: call.id, content: result });
+    }
+    messages.push({ role: "user", content: results });
+    // loop continues so Claude can respond to the results
+  }
+  print("stopped after several tool steps — ask again to continue", "warn");
+}
+
+/* ---------- wiring ---------- */
+const input = document.getElementById("input");
+input.addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter" || !input.value.trim()) return;
+  const v = input.value;
+  input.value = "";
+  print(v, "you");
+  await runCommand(v);
+});
+
+document.getElementById("addBtn").onclick = () => document.getElementById("picker").click();
+document.getElementById("picker").onchange = (e) => addFiles(e.target.files);
+
+let autoWrite = false;
+document.getElementById("autoBtn").onclick = (e) => {
+  autoWrite = !autoWrite;
+  e.target.textContent = autoWrite ? "confirm edits: off" : "confirm edits: on";
+  print(autoWrite
+    ? "edits will now apply automatically without asking"
+    : "edits will ask for confirmation before applying", "warn");
+};
+document.getElementById("tokenBtn").onclick = () => {
+  getToken(true);
+  print(localStorage.getItem("apiToken") ? "token saved in this browser" : "no token set", "sys");
+};
+document.getElementById("wipeBtn").onclick = async () => {
+  if (!confirm("Clear all stored files AND the API token from this browser?")) return;
+  await DB.clear();
+  localStorage.removeItem("apiToken");
+  await refreshStat();
+  print("cleared all files and token", "sys");
+};
+
+/* drag & drop */
+const drop = document.getElementById("drop");
+let dragDepth = 0;
+window.addEventListener("dragenter", e => { e.preventDefault(); dragDepth++; drop.classList.add("on"); });
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("dragleave", e => { dragDepth--; if (dragDepth <= 0) drop.classList.remove("on"); });
+window.addEventListener("drop", e => {
+  e.preventDefault(); dragDepth = 0; drop.classList.remove("on");
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+
+/* boot */
+(async function boot() {
+  print("filechat — a browser-local file assistant", "sys");
+  print(`API endpoint: ${API_BASE}`, "sys");
+  print("your files live only in this browser (IndexedDB). click 'set token' to enter your gateway bearer token, kept only in this browser.", "sys");
+  print("type 'help' for commands, or add files and ask away.", "sys");
+  await refreshStat();
+  const keys = await DB.keys();
+  if (keys.length) print(`restored ${keys.length} file(s) from last session`, "sys");
+})();
+</script>
+</body>
+</html>
