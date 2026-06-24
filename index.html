@@ -841,11 +841,31 @@ async function buildSystem() {
   return sys;
 }
 
+/* trim conversation so it never ends with an orphaned tool_use (no tool_result after it) */
+function trimDanglingToolUse() {
+  while (conversation.length) {
+    const last = conversation[conversation.length - 1];
+    // if last message is assistant with tool_use blocks, remove it (no result followed)
+    if (last.role === "assistant") {
+      const blocks = Array.isArray(last.content) ? last.content : [last.content];
+      if (blocks.some(b => b.type === "tool_use")) { conversation.pop(); continue; }
+    }
+    // if last message is a user tool_result array that's now orphaned, remove it too
+    if (last.role === "user" && Array.isArray(last.content) && last.content[0]?.type === "tool_result") {
+      conversation.pop(); continue;
+    }
+    break;
+  }
+}
+
 async function askClaude(question) {
   const token = getToken();
   if (!token) { print("no gateway token set — click 'set token'", "err"); return; }
 
   const system = await buildSystem();
+
+  // clean up any broken state from a previous failed exchange
+  trimDanglingToolUse();
 
   // append user message to persistent history
   conversation.push({ role: "user", content: question });
@@ -875,11 +895,13 @@ async function askClaude(question) {
       if (!res.ok) {
         print(`API error ${res.status}: ${data.error?.message || JSON.stringify(data)}`, "err");
         if (res.status === 401) print("token rejected — click 'set token' to re-enter", "warn");
+        trimDanglingToolUse();
         return;
       }
     } catch (e) {
       thinking.remove();
       print(`request failed: ${e.message}`, "err");
+      trimDanglingToolUse();
       return;
     }
 
