@@ -894,7 +894,8 @@ async function askClaude(question) {
         tools: TOOLS,
         messages: conversation
       };
-      const entry = { ts: new Date().toISOString(), turn, request: reqBody, response: null, error: null };
+      // snapshot messages for debug log (conversation is mutated later)
+      const entry = { ts: new Date().toISOString(), turn, request: { ...reqBody, messages: JSON.parse(JSON.stringify(conversation)) }, response: null, error: null };
       debugLog.push(entry);
 
       const res = await fetch(API_URL, {
