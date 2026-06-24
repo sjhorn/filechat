@@ -158,12 +158,57 @@
   }
   #drop.on { display: flex; }
   a { color: var(--user); }
+
+  /* file drawer */
+  #drawer {
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height .25s ease;
+  }
+  #drawer.open { max-height: 260px; overflow-y: auto; }
+  #drawer-list {
+    padding: 8px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  #drawer-list:empty::after {
+    content: "no files yet — drag some in or click + add files";
+    color: var(--dim);
+  }
+  .file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--ink);
+  }
+  .file-chip .name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-chip .size { color: var(--dim); font-size: 11px; }
+  .file-chip button {
+    background: transparent;
+    border: none;
+    color: var(--user);
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  .file-chip button:hover { color: var(--accent); }
+  .file-chip .rm { color: var(--err); }
+  .file-chip .rm:hover { color: var(--warn); }
 </style>
 </head>
 <body>
   <header>
     <span class="brand">filechat</span>
-    <span class="stat" id="fileStat">0 files</span>
+    <button id="fileStat" style="cursor:pointer">0 files ▸</button>
     <span class="grow"></span>
     <button id="addBtn">+ add files</button>
     <button id="autoBtn" title="when on, Claude's edits apply without asking">confirm edits: on</button>
@@ -171,6 +216,8 @@
     <button id="wipeBtn">clear all</button>
     <input type="file" id="picker" multiple hidden>
   </header>
+
+  <div id="drawer"><div id="drawer-list"></div></div>
 
   <div id="log" aria-live="polite"></div>
 
@@ -271,8 +318,49 @@ async function addFiles(fileList) {
 
 async function refreshStat() {
   const keys = await DB.keys();
-  document.getElementById("fileStat").textContent =
-    `${keys.length} file${keys.length === 1 ? "" : "s"}`;
+  const drawer = document.getElementById("drawer");
+  const isOpen = drawer.classList.contains("open");
+  const btn = document.getElementById("fileStat");
+  btn.textContent = `${keys.length} file${keys.length === 1 ? "" : "s"} ${isOpen ? "▾" : "▸"}`;
+
+  // rebuild drawer contents
+  const list = document.getElementById("drawer-list");
+  list.innerHTML = "";
+  for (const k of keys) {
+    const text = await DB.get(k);
+    const chip = document.createElement("span");
+    chip.className = "file-chip";
+    chip.innerHTML =
+      `<span class="name">${escapeHTML(k)}</span>`
+      + `<span class="size">${formatSize(text.length)}</span>`
+      + `<button class="dl" title="download">↓</button>`
+      + `<button class="rm" title="remove">✕</button>`;
+    chip.querySelector(".dl").onclick = () => downloadFile(k, text);
+    chip.querySelector(".rm").onclick = async () => {
+      await DB.del(k);
+      print(`removed ${k}`, "sys");
+      await refreshStat();
+    };
+    list.appendChild(chip);
+  }
+}
+
+function formatSize(chars) {
+  if (chars < 1000) return chars + " ch";
+  if (chars < 1_000_000) return (chars / 1000).toFixed(1) + " k";
+  return (chars / 1_000_000).toFixed(1) + " M";
+}
+
+function downloadFile(name, content) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /* ---------- commands ---------- */
@@ -608,6 +696,11 @@ input.addEventListener("keydown", async (e) => {
   await runCommand(v);
 });
 
+document.getElementById("fileStat").onclick = async () => {
+  const drawer = document.getElementById("drawer");
+  drawer.classList.toggle("open");
+  await refreshStat();
+};
 document.getElementById("addBtn").onclick = () => document.getElementById("picker").click();
 document.getElementById("picker").onchange = (e) => addFiles(e.target.files);
 
