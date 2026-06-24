@@ -441,7 +441,7 @@ with the contents of your files included as context.`, "sys");
   }
 }
 
-function escapeHTML(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function escapeHTML(s){return (s ?? "").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 
 /* ---------- minimal, dependency-free markdown renderer ----------
    Escapes HTML first (safe against echoed file content), then applies
@@ -674,15 +674,15 @@ function buildHunks(ops, a, b, ctx) {
         if (op.aIdx < aStart) aStart = op.aIdx;
         if (op.bIdx < bStart) bStart = op.bIdx;
         aCount++; bCount++;
-        lines.push({ type: "ctx", lnA: op.aIdx, lnB: op.bIdx, text: a[op.aIdx] });
+        lines.push({ type: "ctx", lnA: op.aIdx, lnB: op.bIdx, text: a[op.aIdx] ?? "" });
       } else if (op.type === "del") {
         if (op.aIdx < aStart) aStart = op.aIdx;
         aCount++;
-        lines.push({ type: "del", lnA: op.aIdx, lnB: null, text: a[op.aIdx] });
+        lines.push({ type: "del", lnA: op.aIdx, lnB: null, text: a[op.aIdx] ?? "" });
       } else {
         if (op.bIdx < bStart) bStart = op.bIdx;
         bCount++;
-        lines.push({ type: "add", lnA: null, lnB: op.bIdx, text: b[op.bIdx] });
+        lines.push({ type: "add", lnA: null, lnB: op.bIdx, text: b[op.bIdx] ?? "" });
       }
     }
     if (aStart === Infinity) aStart = 0;
