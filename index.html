@@ -210,6 +210,7 @@
     <span class="brand">filechat</span>
     <button id="fileStat" style="cursor:pointer">0 files ▸</button>
     <span class="grow"></span>
+    <button id="compressBtn">compress</button>
     <button id="addBtn">+ add files</button>
     <button id="autoBtn" title="when on, Claude's edits apply without asking">confirm edits: on</button>
     <button id="tokenBtn">set token</button>
@@ -377,6 +378,9 @@ cat <file>       print a file's contents
 search <term>    find a term across all files (case-insensitive)
 rm <file>        remove a file
 help             this message
+
+Conversation is auto-saved to memory.md after each exchange.
+Auto-compresses at 80% of 256k context, or click "compress" manually.
 
 Anything that isn't a command is sent to Claude as a question,
 with the contents of your files included as context.`, "sys");
@@ -600,14 +604,96 @@ async function executeTool(name, input) {
   return `Success: ${prev.path} now has ${prev.after.length} characters.`;
 }
 
-/* ---------- Claude call (agentic tool-use loop) ---------- */
-async function askClaude(question) {
-  const token = getToken();
-  if (!token) { print("no gateway token set — click 'set token'", "err"); return; }
+/* ---------- conversation memory ---------- */
+const MEMORY_FILE = "memory.md";
+const conversation = []; // persistent conversation history
+const CONTEXT_LIMIT = 256_000;     // model context window in tokens
+const COMPRESS_AT = Math.floor(CONTEXT_LIMIT * 0.8); // 204,800 tokens
+let lastInputTokens = 0;           // updated after each API call
 
+/* serialize conversation to a readable markdown log */
+function conversationToMarkdown() {
+  const lines = ["# Conversation Memory\n"];
+  for (const msg of conversation) {
+    if (msg.role === "user") {
+      if (typeof msg.content === "string") {
+        lines.push(`## You\n${msg.content}\n`);
+      }
+      // skip tool_result turns in the log
+    } else if (msg.role === "assistant") {
+      const parts = Array.isArray(msg.content) ? msg.content : [msg.content];
+      const text = parts.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+      const tools = parts.filter(b => b.type === "tool_use");
+      if (text) lines.push(`## Claude\n${text}\n`);
+      for (const t of tools) {
+        lines.push(`> *tool: ${t.name}* — ${t.input.path || ""}\n`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+/* save current conversation to memory.md after each exchange */
+async function saveConversation() {
+  if (!conversation.length) return;
+  await DB.put(MEMORY_FILE, conversationToMarkdown());
+  await refreshStat();
+}
+
+/* compress: summarize conversation via Claude, save to memory.md, reset */
+async function compressConversation() {
+  const token = getToken();
+  if (!token || !conversation.length) return;
+
+  // save full log first
+  await saveConversation();
+
+  const thinking = print("compressing conversation…", "thinking");
+  try {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 800,
+        system: "Summarize the conversation so far into a concise recap (under 500 words). "
+          + "Cover: what files were discussed, what was changed, key decisions, and any open questions. "
+          + "Write in markdown. This summary will seed the next conversation so Claude has context.",
+        messages: [...conversation, {
+          role: "user",
+          content: "Please summarize our conversation so far."
+        }]
+      })
+    });
+    const data = await res.json();
+    thinking.remove();
+    if (!res.ok) {
+      print(`compress failed: ${data.error?.message || "unknown error"}`, "err");
+      return;
+    }
+    const summary = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+    if (summary) await DB.put(MEMORY_FILE, summary);
+  } catch (e) {
+    thinking.remove();
+    print(`compress failed: ${e.message}`, "err");
+    return;
+  }
+
+  conversation.length = 0;
+  lastInputTokens = 0;
+  print("conversation compressed into memory.md — context freed", "sys");
+  await refreshStat();
+}
+
+/* ---------- Claude call (agentic tool-use loop) ---------- */
+async function buildSystem() {
   const keys = await DB.keys();
   let context = "";
   for (const k of keys) {
+    if (k === MEMORY_FILE) continue; // don't include memory.md as file context
     const text = await DB.get(k);
     context += `\n\n===== FILE: ${k} =====\n${text}`;
   }
@@ -617,19 +703,31 @@ async function askClaude(question) {
     print("note: files exceed context limit, truncating", "warn");
   }
 
-  // running conversation for this request (so tool results can be sent back)
-  const messages = [{
-    role: "user",
-    content: context
-      ? `Here are my files:${context}\n\n---\n${question}`
-      : `(No files loaded.) ${question}`
-  }];
-
-  const system = "You are a helpful assistant working with the user's files in a browser-based store. "
+  let sys = "You are a helpful assistant working with the user's files in a browser-based store. "
     + "Answer questions from the file contents, and cite file names when relevant. "
     + "When the user asks you to change a file, use the write_file or str_replace tools — "
     + "prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
     + "Edits are applied to the user's local browser storage only.";
+
+  // inject prior conversation summary if available
+  const memory = await DB.get(MEMORY_FILE);
+  if (memory && !conversation.length) {
+    sys += "\n\n--- PRIOR CONVERSATION SUMMARY ---\n" + memory
+      + "\n--- END SUMMARY (the full log is stored in memory.md) ---";
+  }
+
+  sys += context ? "\n\nThe user's current files:" + context : "\n\n(No files loaded.)";
+  return sys;
+}
+
+async function askClaude(question) {
+  const token = getToken();
+  if (!token) { print("no gateway token set — click 'set token'", "err"); return; }
+
+  const system = await buildSystem();
+
+  // append user message to persistent history
+  conversation.push({ role: "user", content: question });
 
   const MAX_TURNS = 6;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -648,7 +746,7 @@ async function askClaude(question) {
           max_tokens: 1500,
           system,
           tools: TOOLS,
-          messages
+          messages: conversation
         })
       });
       data = await res.json();
@@ -669,10 +767,21 @@ async function askClaude(question) {
     if (textOut) printMarkdown(textOut);
 
     // record the assistant turn verbatim (needed for the tool loop)
-    messages.push({ role: "assistant", content: data.content });
+    conversation.push({ role: "assistant", content: data.content });
+
+    // track token usage
+    if (data.usage) lastInputTokens = data.usage.input_tokens || 0;
 
     const toolCalls = (data.content || []).filter(b => b.type === "tool_use");
-    if (data.stop_reason !== "tool_use" || !toolCalls.length) return; // done
+    if (data.stop_reason !== "tool_use" || !toolCalls.length) {
+      await saveConversation();
+      // auto-compress if approaching context limit
+      if (lastInputTokens >= COMPRESS_AT) {
+        print(`context at ${Math.round(lastInputTokens / CONTEXT_LIMIT * 100)}% — auto-compressing…`, "warn");
+        await compressConversation();
+      }
+      return; // done
+    }
 
     // execute each tool call and gather results
     const results = [];
@@ -680,7 +789,7 @@ async function askClaude(question) {
       const result = await executeTool(call.name, call.input);
       results.push({ type: "tool_result", tool_use_id: call.id, content: result });
     }
-    messages.push({ role: "user", content: results });
+    conversation.push({ role: "user", content: results });
     // loop continues so Claude can respond to the results
   }
   print("stopped after several tool steps — ask again to continue", "warn");
@@ -696,6 +805,10 @@ input.addEventListener("keydown", async (e) => {
   await runCommand(v);
 });
 
+document.getElementById("compressBtn").onclick = async () => {
+  if (!conversation.length) { print("nothing to compress yet", "sys"); return; }
+  await compressConversation();
+};
 document.getElementById("fileStat").onclick = async () => {
   const drawer = document.getElementById("drawer");
   drawer.classList.toggle("open");
@@ -720,8 +833,9 @@ document.getElementById("wipeBtn").onclick = async () => {
   if (!confirm("Clear all stored files AND the API token from this browser?")) return;
   await DB.clear();
   localStorage.removeItem("apiToken");
+  conversation.length = 0;
   await refreshStat();
-  print("cleared all files and token", "sys");
+  print("cleared all files, token, and conversation history", "sys");
 };
 
 /* drag & drop */
@@ -744,6 +858,8 @@ window.addEventListener("drop", e => {
   await refreshStat();
   const keys = await DB.keys();
   if (keys.length) print(`restored ${keys.length} file(s) from last session`, "sys");
+  const memory = await DB.get(MEMORY_FILE);
+  if (memory) print("loaded prior summary from memory.md — Claude has context from last session", "sys");
 })();
 </script>
 </body>
