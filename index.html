@@ -826,8 +826,9 @@ async function buildSystem() {
 
   let sys = "You are a helpful assistant working with the user's files in a browser-based store. "
     + "Answer questions from the file contents, and cite file names when relevant. "
-    + "When the user asks you to change a file, use the write_file or str_replace tools — "
-    + "prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
+    + "When the user asks you to change a file, use the write_file or str_replace tools immediately — "
+    + "do NOT just describe what you would change; call the tool right away. "
+    + "Prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
     + "Edits are applied to the user's local browser storage only.";
 
   // inject prior conversation summary if available
@@ -884,7 +885,7 @@ async function askClaude(question) {
         headers,
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
-          max_tokens: 1500,
+          max_tokens: 4096,
           system,
           tools: TOOLS,
           messages: conversation
