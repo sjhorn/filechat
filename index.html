@@ -220,6 +220,7 @@
     <button id="compressBtn">compress</button>
     <button id="addBtn">+ add files</button>
     <button id="autoBtn" title="when on, Claude's edits apply without asking">confirm edits: on</button>
+    <button id="logBtn">↓ log</button>
     <button id="tokenBtn">set token</button>
     <button id="wipeBtn">clear all</button>
     <input type="file" id="picker" multiple hidden>
@@ -731,6 +732,7 @@ const conversation = []; // persistent conversation history
 const CONTEXT_LIMIT = 256_000;     // model context window in tokens
 const COMPRESS_AT = Math.floor(CONTEXT_LIMIT * 0.8); // 204,800 tokens
 let lastInputTokens = 0;           // updated after each API call
+const debugLog = [];                // raw API request/response log
 
 /* serialize conversation to a readable markdown log */
 function conversationToMarkdown() {
@@ -880,18 +882,23 @@ async function askClaude(question) {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + token
       };
+      const reqBody = {
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        system,
+        tools: TOOLS,
+        messages: conversation
+      };
+      const entry = { ts: new Date().toISOString(), turn, request: reqBody, response: null, error: null };
+      debugLog.push(entry);
+
       const res = await fetch(API_URL, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 8192,
-          system,
-          tools: TOOLS,
-          messages: conversation
-        })
+        body: JSON.stringify(reqBody)
       });
       data = await res.json();
+      entry.response = { status: res.status, body: data };
       thinking.remove();
       if (!res.ok) {
         print(`API error ${res.status}: ${data.error?.message || JSON.stringify(data)}`, "err");
@@ -901,6 +908,7 @@ async function askClaude(question) {
       }
     } catch (e) {
       thinking.remove();
+      debugLog[debugLog.length - 1].error = e.message;
       print(`request failed: ${e.message}`, "err");
       trimDanglingToolUse();
       return;
@@ -932,6 +940,7 @@ async function askClaude(question) {
     for (const call of toolCalls) {
       const result = await executeTool(call.name, call.input);
       results.push({ type: "tool_result", tool_use_id: call.id, content: result });
+      debugLog.push({ ts: new Date().toISOString(), tool: call.name, input: call.input, result });
     }
     conversation.push({ role: "user", content: results });
     // loop continues so Claude can respond to the results
@@ -973,11 +982,18 @@ document.getElementById("tokenBtn").onclick = () => {
   getToken(true);
   print(localStorage.getItem("apiToken") ? "token saved in this browser" : "no token set", "sys");
 };
+document.getElementById("logBtn").onclick = () => {
+  if (!debugLog.length) { print("no API calls logged yet", "sys"); return; }
+  const text = JSON.stringify(debugLog, null, 2);
+  downloadFile("filechat-debug.json", text);
+  print(`downloaded debug log (${debugLog.length} entries)`, "sys");
+};
 document.getElementById("wipeBtn").onclick = async () => {
   if (!confirm("Clear all stored files AND the API token from this browser?")) return;
   await DB.clear();
   localStorage.removeItem("apiToken");
   conversation.length = 0;
+  debugLog.length = 0;
   log.innerHTML = "";
   await refreshStat();
   print("cleared all files, token, and conversation history", "sys");
