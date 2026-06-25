@@ -70,7 +70,7 @@
   .err { color: var(--err); }
   .warn { color: var(--warn); }
   .ai { color: var(--ink); }
-  .ai::before { content: "claude › "; color: var(--accent); }
+  .ai::before { content: "agent › "; color: var(--accent); }
 
   /* rendered markdown */
   .md { white-space: normal; }
@@ -219,7 +219,7 @@
     <span class="grow"></span>
     <button id="compressBtn">compress</button>
     <button id="addBtn">+ add files</button>
-    <button id="autoBtn" title="when on, Claude's edits apply without asking">confirm edits: on</button>
+    <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button>
     <button id="logBtn">↓ log</button>
     <button id="tokenBtn">set token</button>
     <button id="wipeBtn">clear all</button>
@@ -230,7 +230,7 @@
 
   <div id="log" aria-live="polite"></div>
 
-  <div class="hint">commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask Claude to edit a file</div>
+  <div class="hint">commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask the agent to edit a file</div>
 
   <footer>
     <input id="input" autocomplete="off" placeholder="ask a question, or type a command…" autofocus>
@@ -390,7 +390,7 @@ help             this message
 Conversation is auto-saved to memory.md after each exchange.
 Auto-compresses at 80% of 256k context, or click "compress" manually.
 
-Anything that isn't a command is sent to Claude as a question,
+Anything that isn't a command is sent to the agent as a question,
 with the contents of your files included as context.`, "sys");
       return;
 
@@ -698,7 +698,7 @@ function confirmWrite(name, prev) {
     card.className = "row confirm";
     const verb = prev.before == null ? "create" : "edit";
     card.innerHTML =
-      `<div class="title">Claude wants to ${verb}: ${escapeHTML(prev.path)}</div>`
+      `<div class="title">Agent wants to ${verb}: ${escapeHTML(prev.path)}</div>`
       + `<div class="meta">${name} · ${prev.before == null ? "new file" : prev.before.length + " → " + prev.after.length + " chars"}</div>`
       + `<div class="diff">${(() => { try { return renderDiff(prev.before, prev.after); } catch(e) { return `<tr><td class="code">diff error: ${escapeHTML(e.message)}</td></tr>`; } })()}</div>`
       + `<div class="actions"><button class="ok">apply</button><button class="no">reject</button></div>`;
@@ -752,7 +752,7 @@ function conversationToMarkdown() {
       const parts = Array.isArray(msg.content) ? msg.content : [msg.content];
       const text = parts.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
       const tools = parts.filter(b => b.type === "tool_use");
-      if (text) lines.push(`## Claude\n${text}\n`);
+      if (text) lines.push(`## Agent\n${text}\n`);
       for (const t of tools) {
         lines.push(`> *tool: ${t.name}* — ${t.input.path || ""}\n`);
       }
@@ -1032,7 +1032,7 @@ window.addEventListener("drop", e => {
   const keys = await DB.keys();
   if (keys.length) print(`restored ${keys.length} file(s) from last session`, "sys");
   const memory = await DB.get(MEMORY_FILE);
-  if (memory) print("loaded prior summary from memory.md — Claude has context from last session", "sys");
+  if (memory) print("loaded prior summary from memory.md — agent has context from last session", "sys");
 })();
 </script>
 </body>
