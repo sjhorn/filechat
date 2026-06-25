@@ -812,7 +812,13 @@ async function compressConversation() {
 
   conversation.length = 0;
   lastInputTokens = 0;
-  print("conversation compressed into memory.md — context freed", "sys");
+  log.innerHTML = "";
+  print("conversation compressed — context freed", "sys");
+
+  // show the summary that will seed the next conversation
+  const memory = await DB.get(MEMORY_FILE);
+  if (memory) printMarkdown(memory);
+
   await refreshStat();
 }
 
