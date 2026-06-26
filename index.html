@@ -543,6 +543,49 @@ const TOOLS = [
       },
       required: ["path", "old_str", "new_str"]
     }
+  },
+  {
+    name: "list_files",
+    description: "List all files in the user's store with their sizes and line counts. Use this first to orient yourself — like running ls.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "read_file",
+    description: "Read a file's contents (or a range of lines). Returns line-numbered text. Use a small range to stay focused — read only what you need.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path:   { type: "string", description: "File name / path" },
+        offset: { type: "integer", description: "1-based starting line (default 1)" },
+        limit:  { type: "integer", description: "Max lines to return (default 200, max 2000)" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "grep_files",
+    description: "Search file contents for a pattern (string or regex). Returns matching lines with context, grouped by file. Use this to find relevant sections before reading.",
+    input_schema: {
+      type: "object",
+      properties: {
+        pattern:       { type: "string", description: "Search term or regex pattern" },
+        path:          { type: "string", description: "Restrict search to a single file (optional — omit to search all files)" },
+        context_lines: { type: "integer", description: "Lines of context around each match (default 2, max 5)" }
+      },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "head_file",
+    description: "Read the first N lines of a file. Quick way to see a file's structure before diving deeper.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path:  { type: "string", description: "File name / path" },
+        lines: { type: "integer", description: "Number of lines from the top (default 50)" }
+      },
+      required: ["path"]
+    }
   }
 ];
 
@@ -713,6 +756,90 @@ function confirmWrite(name, prev) {
 /* execute a tool call: preview, confirm (unless auto), write. returns a tool_result string */
 async function executeTool(name, input) {
   try {
+
+  /* ---- read-only tools (no confirmation needed) ---- */
+
+  if (name === "list_files") {
+    const keys = await DB.keys();
+    const listing = [];
+    for (const k of keys) {
+      if (k === MEMORY_FILE) continue;
+      const text = await DB.get(k);
+      const lines = text.split("\n").length;
+      listing.push({ name: k, size_chars: text.length, lines });
+    }
+    printHTML(`<span class="sys">list_files → ${listing.length} file(s)</span>`, "sys");
+    return JSON.stringify(listing, null, 2);
+  }
+
+  if (name === "read_file") {
+    const text = await DB.get(input.path);
+    if (text == null) return `Error: no such file: ${input.path}`;
+    const allLines = text.split("\n");
+    const offset = Math.max(1, input.offset || 1);
+    const limit = Math.min(input.limit || 200, 2000);
+    const start = offset - 1;
+    const slice = allLines.slice(start, start + limit);
+    const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(5)} | ${l}`).join("\n");
+    const total = allLines.length;
+    const end = Math.min(offset + slice.length - 1, total);
+    const trailer = `(lines ${offset}-${end} of ${total})`;
+    printHTML(`<span class="sys">read_file → <b>${escapeHTML(input.path)}</b> ${trailer}</span>`, "sys");
+    return numbered + "\n\n" + trailer;
+  }
+
+  if (name === "head_file") {
+    const text = await DB.get(input.path);
+    if (text == null) return `Error: no such file: ${input.path}`;
+    const n = Math.min(input.lines || 50, 500);
+    const allLines = text.split("\n");
+    const slice = allLines.slice(0, n);
+    const numbered = slice.map((l, i) => `${String(i + 1).padStart(5)} | ${l}`).join("\n");
+    const total = allLines.length;
+    const trailer = `(first ${slice.length} of ${total} lines)`;
+    printHTML(`<span class="sys">head_file → <b>${escapeHTML(input.path)}</b> ${trailer}</span>`, "sys");
+    return numbered + "\n\n" + trailer;
+  }
+
+  if (name === "grep_files") {
+    let re;
+    try { re = new RegExp(input.pattern, "ig"); }
+    catch (e) { return `Error: invalid pattern: ${e.message}`; }
+    const ctx = Math.min(input.context_lines ?? 2, 5);
+    const targetKeys = input.path
+      ? [input.path]
+      : (await DB.keys()).filter(k => k !== MEMORY_FILE);
+    const output = [];
+    let matchCount = 0;
+    const MAX_MATCHES = 50;
+    for (const k of targetKeys) {
+      const text = await DB.get(k);
+      if (!text) continue;
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length && matchCount < MAX_MATCHES; i++) {
+        if (re.test(lines[i])) {
+          re.lastIndex = 0;
+          matchCount++;
+          const from = Math.max(0, i - ctx);
+          const to = Math.min(lines.length - 1, i + ctx);
+          for (let j = from; j <= to; j++) {
+            const marker = j === i ? ">" : " ";
+            output.push(`${k}:${j + 1}:${marker} ${lines[j]}`);
+          }
+          output.push("---");
+        }
+      }
+    }
+    const fileCount = targetKeys.length;
+    printHTML(`<span class="sys">grep_files → "${escapeHTML(input.pattern)}" across ${fileCount} file(s) → ${matchCount} match(es)</span>`, "sys");
+    if (!matchCount) return `No matches found for "${input.pattern}"`;
+    let result = output.join("\n");
+    if (matchCount >= MAX_MATCHES) result += `\n\n(showing first ${MAX_MATCHES} matches, more may exist)`;
+    return result;
+  }
+
+  /* ---- write tools (need preview + confirmation) ---- */
+
   const prev = await previewTool(name, input);
   if (prev.error) return `Error: ${prev.error}`;
 
@@ -824,25 +951,43 @@ async function compressConversation() {
 
 /* ---------- Claude call (agentic tool-use loop) ---------- */
 async function buildSystem() {
+  const INLINE_THRESHOLD = 12_000; // inline small stores (chars) to avoid unnecessary tool calls
   const keys = await DB.keys();
-  let context = "";
+
+  // build file inventory (name, size, line count)
+  const files = [];
+  let totalChars = 0;
   for (const k of keys) {
-    if (k === MEMORY_FILE) continue; // don't include memory.md as file context
+    if (k === MEMORY_FILE) continue;
     const text = await DB.get(k);
-    context += `\n\n===== FILE: ${k} =====\n${text}`;
-  }
-  const MAX = 150_000;
-  if (context.length > MAX) {
-    context = context.slice(0, MAX);
-    print("note: files exceed context limit, truncating", "warn");
+    const lines = text.split("\n").length;
+    files.push({ name: k, text, size: text.length, lines });
+    totalChars += text.length;
   }
 
-  let sys = "You are a helpful assistant working with the user's files in a browser-based store. "
-    + "Answer questions from the file contents, and cite file names when relevant. "
-    + "When the user asks you to change a file, use the write_file or str_replace tools immediately — "
-    + "do NOT just describe what you would change; call the tool right away. "
-    + "Prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
-    + "Edits are applied to the user's local browser storage only.";
+  // for small stores, inline file contents directly (no tool overhead)
+  const useInline = totalChars > 0 && totalChars <= INLINE_THRESHOLD;
+
+  let sys;
+  if (useInline) {
+    sys = "You are a helpful assistant working with the user's files in a browser-based store. "
+      + "Answer questions from the file contents, and cite file names when relevant. "
+      + "When the user asks you to change a file, use the write_file or str_replace tools immediately — "
+      + "do NOT just describe what you would change; call the tool right away. "
+      + "Prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
+      + "Edits are applied to the user's local browser storage only.";
+  } else {
+    sys = "You are a helpful assistant working with the user's files in a browser-based store. "
+      + "File contents are NOT pre-loaded — treat the file store as external memory and query it on demand.\n\n"
+      + "Workflow:\n"
+      + "1. Use list_files to see what's available (like ls).\n"
+      + "2. Use grep_files to find relevant sections — search first, read second.\n"
+      + "3. Use read_file or head_file to read specific line ranges — only what you need.\n"
+      + "4. To edit: grep/read to locate the target, then str_replace for surgical edits or write_file for full rewrites.\n\n"
+      + "Keep your working context lean — read only what's relevant to the question. "
+      + "Cite file names and line numbers when discussing content. "
+      + "Edits are applied to the user's local browser storage only.";
+  }
 
   // inject prior conversation summary if available
   const memory = await DB.get(MEMORY_FILE);
@@ -851,7 +996,20 @@ async function buildSystem() {
       + "\n--- END SUMMARY (the full log is stored in memory.md) ---";
   }
 
-  sys += context ? "\n\nThe user's current files:" + context : "\n\n(No files loaded.)";
+  if (useInline) {
+    // small store: inline all file contents
+    let context = "";
+    for (const f of files) context += `\n\n===== FILE: ${f.name} =====\n${f.text}`;
+    sys += "\n\nThe user's current files:" + context;
+  } else if (files.length) {
+    // large store: just show the listing
+    let listing = "\n\nFiles in store (use read_file / grep_files to access contents):";
+    for (const f of files) listing += `\n- ${f.name} (${f.size.toLocaleString()} chars, ${f.lines.toLocaleString()} lines)`;
+    sys += listing;
+  } else {
+    sys += "\n\n(No files loaded.)";
+  }
+
   return sys;
 }
 
@@ -884,7 +1042,7 @@ async function askClaude(question) {
   // append user message to persistent history
   conversation.push({ role: "user", content: question });
 
-  const MAX_TURNS = 6;
+  const MAX_TURNS = 15;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const thinking = print(turn === 0 ? "thinking…" : "working…", "thinking");
     let data;

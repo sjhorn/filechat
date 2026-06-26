@@ -56,9 +56,52 @@ const TOOLS = [
       required: ["path", "old_str", "new_str"],
     },
   },
+  {
+    name: "list_files",
+    description: "List all files in the store with sizes and line counts.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "read_file",
+    description: "Read a file's contents (or a range of lines).",
+    input_schema: {
+      type: "object",
+      properties: {
+        path:   { type: "string" },
+        offset: { type: "integer", description: "1-based starting line (default 1)" },
+        limit:  { type: "integer", description: "Max lines to return (default 200)" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "grep_files",
+    description: "Search file contents for a pattern. Returns matching lines with context.",
+    input_schema: {
+      type: "object",
+      properties: {
+        pattern:       { type: "string" },
+        path:          { type: "string" },
+        context_lines: { type: "integer" },
+      },
+      required: ["pattern"],
+    },
+  },
+  {
+    name: "head_file",
+    description: "Read the first N lines of a file.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path:  { type: "string" },
+        lines: { type: "integer" },
+      },
+      required: ["path"],
+    },
+  },
 ];
 
-const SYSTEM =
+const SYSTEM_INLINE =
   "You are a helpful assistant working with the user's files in a browser-based store. " +
   "Answer questions from the file contents, and cite file names when relevant. " +
   "When the user asks you to change a file, use the write_file or str_replace tools immediately — " +
@@ -66,18 +109,52 @@ const SYSTEM =
   "Prefer str_replace for small targeted edits. After editing, briefly say what you changed. " +
   "Edits are applied to the user's local browser storage only.";
 
+const SYSTEM_AGENTIC =
+  "You are a helpful assistant working with the user's files in a browser-based store. " +
+  "File contents are NOT pre-loaded — treat the file store as external memory and query it on demand.\n\n" +
+  "Workflow:\n" +
+  "1. Use list_files to see what's available (like ls).\n" +
+  "2. Use grep_files to find relevant sections — search first, read second.\n" +
+  "3. Use read_file or head_file to read specific line ranges — only what you need.\n" +
+  "4. To edit: grep/read to locate the target, then str_replace for surgical edits or write_file for full rewrites.\n\n" +
+  "Keep your working context lean — read only what's relevant to the question. " +
+  "Cite file names and line numbers when discussing content. " +
+  "Edits are applied to the user's local browser storage only.";
+
 // --- simulated file store ---
 const files = {};
+const INLINE_THRESHOLD = 12_000;
 
 function addFile(name, content) {
   files[name] = content;
 }
 
+function clearFiles() {
+  for (const k of Object.keys(files)) delete files[k];
+}
+
 function buildSystemWithFiles() {
-  const ctx = Object.entries(files)
-    .map(([k, v]) => `\n\n===== FILE: ${k} =====\n${v}`)
-    .join("");
-  return SYSTEM + (ctx ? "\n\nThe user's current files:" + ctx : "");
+  const entries = Object.entries(files);
+  const totalChars = entries.reduce((sum, [, v]) => sum + v.length, 0);
+  const useInline = totalChars > 0 && totalChars <= INLINE_THRESHOLD;
+
+  if (useInline) {
+    const ctx = entries
+      .map(([k, v]) => `\n\n===== FILE: ${k} =====\n${v}`)
+      .join("");
+    return SYSTEM_INLINE + (ctx ? "\n\nThe user's current files:" + ctx : "");
+  }
+
+  if (entries.length) {
+    let listing = "\n\nFiles in store (use read_file / grep_files to access contents):";
+    for (const [k, v] of entries) {
+      const lines = v.split("\n").length;
+      listing += `\n- ${k} (${v.length.toLocaleString()} chars, ${lines.toLocaleString()} lines)`;
+    }
+    return SYSTEM_AGENTIC + listing;
+  }
+
+  return SYSTEM_INLINE + "\n\n(No files loaded.)";
 }
 
 function executeToolCall(name, input) {
@@ -95,6 +172,60 @@ function executeToolCall(name, input) {
       return `Error: old_str is not unique in ${input.path}`;
     files[input.path] = before.replace(input.old_str, input.new_str);
     return `Success: ${input.path} now has ${files[input.path].length} characters.`;
+  }
+  if (name === "list_files") {
+    const listing = Object.entries(files).map(([k, v]) => ({
+      name: k, size_chars: v.length, lines: v.split("\n").length,
+    }));
+    return JSON.stringify(listing, null, 2);
+  }
+  if (name === "read_file") {
+    const text = files[input.path];
+    if (text == null) return `Error: no such file: ${input.path}`;
+    const allLines = text.split("\n");
+    const offset = Math.max(1, input.offset || 1);
+    const limit = Math.min(input.limit || 200, 2000);
+    const start = offset - 1;
+    const slice = allLines.slice(start, start + limit);
+    const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(5)} | ${l}`).join("\n");
+    return numbered + `\n\n(lines ${offset}-${Math.min(offset + slice.length - 1, allLines.length)} of ${allLines.length})`;
+  }
+  if (name === "head_file") {
+    const text = files[input.path];
+    if (text == null) return `Error: no such file: ${input.path}`;
+    const n = Math.min(input.lines || 50, 500);
+    const allLines = text.split("\n");
+    const slice = allLines.slice(0, n);
+    const numbered = slice.map((l, i) => `${String(i + 1).padStart(5)} | ${l}`).join("\n");
+    return numbered + `\n\n(first ${slice.length} of ${allLines.length} lines)`;
+  }
+  if (name === "grep_files") {
+    let re;
+    try { re = new RegExp(input.pattern, "ig"); }
+    catch (e) { return `Error: invalid pattern: ${e.message}`; }
+    const ctx = Math.min(input.context_lines ?? 2, 5);
+    const targetKeys = input.path ? [input.path] : Object.keys(files);
+    const output = [];
+    let matchCount = 0;
+    for (const k of targetKeys) {
+      const text = files[k];
+      if (!text) continue;
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length && matchCount < 50; i++) {
+        if (re.test(lines[i])) {
+          re.lastIndex = 0;
+          matchCount++;
+          const from = Math.max(0, i - ctx);
+          const to = Math.min(lines.length - 1, i + ctx);
+          for (let j = from; j <= to; j++) {
+            output.push(`${k}:${j + 1}:${j === i ? ">" : " "} ${lines[j]}`);
+          }
+          output.push("---");
+        }
+      }
+    }
+    if (!matchCount) return `No matches found for "${input.pattern}"`;
+    return output.join("\n");
   }
   return `Error: unknown tool: ${name}`;
 }
@@ -127,7 +258,7 @@ async function chat(messages, question) {
   const system = buildSystemWithFiles();
   messages.push({ role: "user", content: question });
 
-  const MAX_TURNS = 6;
+  const MAX_TURNS = 15;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const data = await callAPI(system, messages);
     messages.push({ role: "assistant", content: data.content });
@@ -272,6 +403,102 @@ async function main() {
     "conversation ends with assistant response"
   );
   console.log(`  Total messages: ${conversation.length}\n`);
+
+  // --- Test 5: Large file — agentic grep + read workflow ---
+  console.log("TEST 5: Large file (~150k) — agent uses grep/read tools");
+  clearFiles();
+
+  // generate a ~150k file with a needle buried in the middle
+  {
+    const filler = [];
+    for (let i = 1; i <= 3000; i++) filler.push(`line ${i}: Lorem ipsum dolor sit amet, consectetur adipiscing elit.`);
+    filler[1500] = "line 1501: IMPORTANT: The secret project codename is FALCON-9.";
+    filler[1501] = "line 1502: FALCON-9 budget is $2.5 million, lead engineer is Alice.";
+    addFile("large-report.txt", filler.join("\n"));
+
+    const conv5 = [];
+    const r5 = await chat(conv5, "What is the secret project codename in large-report.txt?");
+    assert(r5.text.length > 0, "got a response for large file query");
+    assert(/FALCON.?9/i.test(r5.text), "found the codename FALCON-9 in 150k file");
+
+    // verify the agent used read-only tools (not just text from inline)
+    const toolsUsed = [];
+    for (const msg of conv5) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const b of msg.content) {
+        if (b.type === "tool_use") toolsUsed.push(b.name);
+      }
+    }
+    assert(
+      toolsUsed.some(t => ["grep_files", "read_file", "head_file", "list_files"].includes(t)),
+      `agent used read tools (tools used: ${toolsUsed.join(", ")})`
+    );
+    console.log(`  Tools used: ${toolsUsed.join(" → ")}`);
+    console.log(`  Response: ${r5.text.slice(0, 150)}...\n`);
+  }
+
+  // --- Test 6: Large file — agentic edit workflow ---
+  console.log("TEST 6: Large file (~150k) — agent edits via grep + str_replace");
+  {
+    const conv6 = [];
+    const r6 = await chat(conv6, 'In large-report.txt, change the FALCON-9 budget from "$2.5 million" to "$3.8 million".');
+
+    const updated = files["large-report.txt"];
+    assert(updated && /\$3\.8 million/i.test(updated), "budget updated to $3.8 million");
+    assert(updated && !/\$2\.5 million/i.test(updated), "old budget replaced");
+
+    const toolsUsed = [];
+    for (const msg of conv6) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const b of msg.content) {
+        if (b.type === "tool_use") toolsUsed.push(b.name);
+      }
+    }
+    assert(
+      toolsUsed.includes("str_replace"),
+      `agent used str_replace to edit (tools: ${toolsUsed.join(", ")})`
+    );
+    console.log(`  Tools used: ${toolsUsed.join(" → ")}`);
+    console.log(`  Response: ${r6.text.slice(0, 150)}...\n`);
+  }
+
+  // --- Test 7: Very large file (~1M) — agent can still find content ---
+  console.log("TEST 7: Very large file (~1M) — grep finds needle in haystack");
+  clearFiles();
+  {
+    const filler = [];
+    for (let i = 1; i <= 20000; i++) filler.push(`row ${i}: data_value=${Math.random().toFixed(6)} status=normal category=general`);
+    filler[15000] = "row 15001: data_value=0.999999 status=CRITICAL category=security alert_code=RED-ALPHA-7";
+    addFile("big-dataset.csv", filler.join("\n"));
+
+    const conv7 = [];
+    const r7 = await chat(conv7, "Find the CRITICAL status row in big-dataset.csv. What is the alert_code?");
+    assert(r7.text.length > 0, "got a response for 1M file query");
+    assert(/RED.?ALPHA.?7/i.test(r7.text), "found alert_code RED-ALPHA-7 in 1M file");
+    console.log(`  Response: ${r7.text.slice(0, 150)}...\n`);
+  }
+
+  // --- Test 8: Multiple large files — grep across files ---
+  console.log("TEST 8: Multiple large files — grep across files");
+  clearFiles();
+  {
+    const filler1 = [];
+    for (let i = 1; i <= 5000; i++) filler1.push(`module-a line ${i}: processing data`);
+    filler1[2500] = "module-a line 2501: ERROR: database connection timeout after 30s";
+    addFile("module-a.log", filler1.join("\n"));
+
+    const filler2 = [];
+    for (let i = 1; i <= 5000; i++) filler2.push(`module-b line ${i}: processing data`);
+    filler2[4000] = "module-b line 4001: ERROR: disk space critically low at 2%";
+    addFile("module-b.log", filler2.join("\n"));
+
+    const conv8 = [];
+    const r8 = await chat(conv8, "Find all ERROR lines across the log files. What errors occurred?");
+    assert(r8.text.length > 0, "got a response for multi-file query");
+    assert(/timeout/i.test(r8.text) || /connection/i.test(r8.text), "found database timeout error");
+    assert(/disk/i.test(r8.text) || /space/i.test(r8.text), "found disk space error");
+    console.log(`  Response: ${r8.text.slice(0, 200)}...\n`);
+  }
 
   // --- summary ---
   console.log("---");
