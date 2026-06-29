@@ -223,6 +223,12 @@
   .file-chip button:hover { color: var(--accent); }
   .file-chip .rm { color: var(--err); }
   .file-chip .rm:hover { color: var(--warn); }
+  .zip-all {
+    display: inline-block; margin: 4px; padding: 4px 10px; font-family: var(--mono); font-size: 11px;
+    background: transparent; border: 1px solid var(--accent-dim); border-radius: 12px;
+    color: var(--accent); cursor: pointer;
+  }
+  .zip-all:hover { border-color: var(--accent); }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -233,7 +239,6 @@
     <span class="grow"></span>
     <button id="compressBtn">compress</button>
     <button id="addBtn">+ add files</button>
-    <button id="zipBtn" title="download all files as a zip archive">↓ zip</button>
     <button id="planBtn" title="plan mode: agent proposes changes before editing (shift+tab to cycle)">plan: auto</button>
     <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button>
     <button id="logBtn">↓ log</button>
@@ -368,6 +373,33 @@ async function refreshStat() {
     };
     list.appendChild(chip);
   }
+  // add "zip all" button if there are downloadable files
+  const fileKeys = keys.filter(k => k !== MEMORY_FILE);
+  if (fileKeys.length) {
+    const zipBtn = document.createElement("button");
+    zipBtn.className = "zip-all";
+    zipBtn.textContent = "↓ zip all";
+    zipBtn.title = "download all files as a zip archive";
+    zipBtn.onclick = async () => {
+      const zip = new JSZip();
+      for (const k of fileKeys) zip.file(k, await DB.get(k));
+      const blob = await zip.generateAsync({ type: "blob" });
+      downloadBlob("filechat-files.zip", blob);
+      print(`downloaded ${fileKeys.length} file(s) as filechat-files.zip`, "sys");
+    };
+    list.appendChild(zipBtn);
+  }
+}
+
+function downloadBlob(name, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function formatSize(chars) {
@@ -1253,23 +1285,6 @@ document.getElementById("fileStat").onclick = async () => {
 };
 document.getElementById("addBtn").onclick = () => document.getElementById("picker").click();
 document.getElementById("picker").onchange = (e) => addFiles(e.target.files);
-document.getElementById("zipBtn").onclick = async () => {
-  const keys = await DB.keys();
-  const fileKeys = keys.filter(k => k !== MEMORY_FILE);
-  if (!fileKeys.length) { print("no files to download", "sys"); return; }
-  const zip = new JSZip();
-  for (const k of fileKeys) zip.file(k, await DB.get(k));
-  const blob = await zip.generateAsync({ type: "blob" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "filechat-files.zip";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  print(`downloaded ${fileKeys.length} file(s) as filechat-files.zip`, "sys");
-};
 document.getElementById("planBtn").onclick = cyclePlanMode;
 
 let autoWrite = false;
