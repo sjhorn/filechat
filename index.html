@@ -153,6 +153,19 @@
   .confirm button.no { border-color: var(--err); color: var(--err); }
   .confirm button:focus-visible { outline: 2px solid var(--user); outline-offset: 1px; }
 
+  .plan-card { border: 1px solid var(--user); border-radius: 6px; padding: 10px 12px; margin: 0 0 10px; background: var(--panel); }
+  .plan-card .plan-title { color: var(--user); margin-bottom: 6px; }
+  .plan-card .plan-summary { margin-bottom: 8px; }
+  .plan-card .plan-steps { margin: 0 0 8px; padding-left: 20px; }
+  .plan-card .plan-steps li { margin-bottom: 3px; }
+  .plan-card .plan-files { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  .plan-card .plan-actions { display: flex; gap: 8px; align-items: center; }
+  .plan-card .plan-actions input {
+    flex: 1; font-family: var(--mono); font-size: 12px; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--ink);
+  }
+  .plan-card .plan-actions input:focus { border-color: var(--user); outline: none; }
+
   /* drag overlay */
   #drop {
     position: fixed; inset: 0;
@@ -219,6 +232,7 @@
     <span class="grow"></span>
     <button id="compressBtn">compress</button>
     <button id="addBtn">+ add files</button>
+    <button id="planBtn" title="plan mode: agent proposes changes before editing (shift+tab to cycle)">plan: auto</button>
     <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button>
     <button id="logBtn">↓ log</button>
     <button id="tokenBtn">set token</button>
@@ -586,6 +600,19 @@ const TOOLS = [
       },
       required: ["path"]
     }
+  },
+  {
+    name: "propose_plan",
+    description: "Present a plan to the user before making changes. Call this BEFORE any write_file or str_replace when the task involves editing files. Describe what you found and what you intend to change. The user will approve or request revisions.",
+    input_schema: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "Brief summary of what you plan to do" },
+        steps: { type: "array", items: { type: "string" }, description: "Ordered list of specific changes" },
+        files_affected: { type: "array", items: { type: "string" }, description: "File names that will be created or modified" }
+      },
+      required: ["summary", "steps"]
+    }
   }
 ];
 
@@ -753,6 +780,50 @@ function confirmWrite(name, prev) {
   });
 }
 
+function confirmPlan(input) {
+  return new Promise(resolve => {
+    const card = document.createElement("div");
+    card.className = "row plan-card";
+    const stepsHtml = (input.steps || []).map(s => `<li>${escapeHTML(s)}</li>`).join("");
+    const filesHtml = input.files_affected?.length
+      ? `<div class="plan-files">Files: ${input.files_affected.map(f => `<b>${escapeHTML(f)}</b>`).join(", ")}</div>`
+      : "";
+    card.innerHTML =
+      `<div class="plan-title">Proposed Plan</div>`
+      + `<div class="plan-summary">${escapeHTML(input.summary)}</div>`
+      + `<ol class="plan-steps">${stepsHtml}</ol>`
+      + filesHtml
+      + `<div class="plan-actions">`
+      +   `<button class="ok">approve</button>`
+      +   `<input class="revise-input" placeholder="type feedback to revise…">`
+      +   `<button class="no">reject</button>`
+      + `</div>`;
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+
+    const okBtn = card.querySelector(".ok");
+    const noBtn = card.querySelector(".no");
+    const reviseInput = card.querySelector(".revise-input");
+
+    okBtn.onclick = () => {
+      card.querySelector(".plan-actions").innerHTML = '<span class="sys">approved</span>';
+      resolve("Plan approved. Execute the changes now.");
+    };
+    noBtn.onclick = () => {
+      card.querySelector(".plan-actions").innerHTML = '<span class="warn">rejected</span>';
+      resolve("The user rejected this plan. Do not proceed with any edits.");
+    };
+    reviseInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || !reviseInput.value.trim()) return;
+      const feedback = reviseInput.value.trim();
+      card.querySelector(".plan-actions").innerHTML = `<span class="sys">revision requested: ${escapeHTML(feedback)}</span>`;
+      resolve(`The user wants you to revise the plan. Their feedback: ${feedback}`);
+    });
+
+    okBtn.focus();
+  });
+}
+
 /* execute a tool call: preview, confirm (unless auto), write. returns a tool_result string */
 async function executeTool(name, input) {
   try {
@@ -838,7 +909,18 @@ async function executeTool(name, input) {
     return result;
   }
 
+  if (name === "propose_plan") {
+    const result = await confirmPlan(input);
+    if (result.startsWith("Plan approved")) planApproved = true;
+    return result;
+  }
+
   /* ---- write tools (need preview + confirmation) ---- */
+
+  // hard gate: in plan mode "on", block writes until a plan is approved
+  if (planMode === "on" && !planApproved && (name === "write_file" || name === "str_replace")) {
+    return "Error: Plan mode is active. You must call propose_plan and get approval before making edits.";
+  }
 
   const prev = await previewTool(name, input);
   if (prev.error) return `Error: ${prev.error}`;
@@ -989,6 +1071,20 @@ async function buildSystem() {
       + "Edits are applied to the user's local browser storage only.";
   }
 
+  // plan mode instructions
+  if (planMode === "on") {
+    sys += "\n\nIMPORTANT — PLAN MODE IS ACTIVE. Before making ANY edits, you MUST:\n"
+      + "1. Investigate using read-only tools (list_files, read_file, grep_files, head_file).\n"
+      + "2. Call propose_plan with your summary, steps, and affected files.\n"
+      + "3. Wait for the user to approve before calling write_file or str_replace.\n"
+      + "Do NOT skip the propose_plan step. Do NOT call write tools before your plan is approved.";
+  } else if (planMode === "auto") {
+    sys += "\n\nWhen the user's request involves creating or editing files, call propose_plan first "
+      + "to present your approach before making changes. For simple questions about file contents, "
+      + "answer directly without a plan.";
+  }
+  // planMode === "off" — no plan instructions, direct action
+
   // inject prior conversation summary if available
   const memory = await DB.get(MEMORY_FILE);
   if (memory && !conversation.length) {
@@ -1034,6 +1130,7 @@ async function askClaude(question) {
   const token = getToken();
   if (!token) { print("no gateway token set — click 'set token'", "err"); return; }
 
+  planApproved = false; // reset plan gate for each new exchange
   const system = await buildSystem();
 
   // clean up any broken state from a previous failed exchange
@@ -1118,9 +1215,24 @@ async function askClaude(question) {
   print("stopped after several tool steps — ask again to continue", "warn");
 }
 
+/* ---------- plan mode ---------- */
+let planMode = "auto"; // "auto" | "on" | "off"
+let planApproved = false;
+
+function cyclePlanMode() {
+  planMode = planMode === "auto" ? "on" : planMode === "on" ? "off" : "auto";
+  document.getElementById("planBtn").textContent = `plan: ${planMode}`;
+  print(`plan mode: ${planMode}`, "warn");
+}
+
 /* ---------- wiring ---------- */
 const input = document.getElementById("input");
 input.addEventListener("keydown", async (e) => {
+  if (e.key === "Tab" && e.shiftKey) {
+    e.preventDefault();
+    cyclePlanMode();
+    return;
+  }
   if (e.key !== "Enter" || !input.value.trim()) return;
   const v = input.value;
   input.value = "";
@@ -1139,6 +1251,7 @@ document.getElementById("fileStat").onclick = async () => {
 };
 document.getElementById("addBtn").onclick = () => document.getElementById("picker").click();
 document.getElementById("picker").onchange = (e) => addFiles(e.target.files);
+document.getElementById("planBtn").onclick = cyclePlanMode;
 
 let autoWrite = false;
 document.getElementById("autoBtn").onclick = (e) => {

@@ -99,6 +99,19 @@ const TOOLS = [
       required: ["path"],
     },
   },
+  {
+    name: "propose_plan",
+    description: "Present a plan to the user before making changes. Call this BEFORE any write_file or str_replace when the task involves editing files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        summary: { type: "string" },
+        steps: { type: "array", items: { type: "string" } },
+        files_affected: { type: "array", items: { type: "string" } },
+      },
+      required: ["summary", "steps"],
+    },
+  },
 ];
 
 const SYSTEM_INLINE =
@@ -133,16 +146,27 @@ function clearFiles() {
   for (const k of Object.keys(files)) delete files[k];
 }
 
-function buildSystemWithFiles() {
+const PLAN_AUTO = "\n\nWhen the user's request involves creating or editing files, call propose_plan first "
+  + "to present your approach before making changes. For simple questions about file contents, "
+  + "answer directly without a plan.";
+
+const PLAN_ON = "\n\nIMPORTANT — PLAN MODE IS ACTIVE. Before making ANY edits, you MUST:\n"
+  + "1. Investigate using read-only tools (list_files, read_file, grep_files, head_file).\n"
+  + "2. Call propose_plan with your summary, steps, and affected files.\n"
+  + "3. Wait for the user to approve before calling write_file or str_replace.\n"
+  + "Do NOT skip the propose_plan step. Do NOT call write tools before your plan is approved.";
+
+function buildSystemWithFiles(mode = "auto") {
   const entries = Object.entries(files);
   const totalChars = entries.reduce((sum, [, v]) => sum + v.length, 0);
   const useInline = totalChars > 0 && totalChars <= INLINE_THRESHOLD;
+  const planSuffix = mode === "on" ? PLAN_ON : mode === "auto" ? PLAN_AUTO : "";
 
   if (useInline) {
     const ctx = entries
       .map(([k, v]) => `\n\n===== FILE: ${k} =====\n${v}`)
       .join("");
-    return SYSTEM_INLINE + (ctx ? "\n\nThe user's current files:" + ctx : "");
+    return SYSTEM_INLINE + planSuffix + (ctx ? "\n\nThe user's current files:" + ctx : "");
   }
 
   if (entries.length) {
@@ -151,10 +175,10 @@ function buildSystemWithFiles() {
       const lines = v.split("\n").length;
       listing += `\n- ${k} (${v.length.toLocaleString()} chars, ${lines.toLocaleString()} lines)`;
     }
-    return SYSTEM_AGENTIC + listing;
+    return SYSTEM_AGENTIC + planSuffix + listing;
   }
 
-  return SYSTEM_INLINE + "\n\n(No files loaded.)";
+  return SYSTEM_INLINE + planSuffix + "\n\n(No files loaded.)";
 }
 
 function executeToolCall(name, input) {
@@ -227,6 +251,10 @@ function executeToolCall(name, input) {
     if (!matchCount) return `No matches found for "${input.pattern}"`;
     return output.join("\n");
   }
+  if (name === "propose_plan") {
+    // auto-approve plans in tests
+    return "Plan approved. Execute the changes now.";
+  }
   return `Error: unknown tool: ${name}`;
 }
 
@@ -254,8 +282,8 @@ async function callAPI(system, messages) {
 }
 
 // --- agentic loop (mirrors index.html) ---
-async function chat(messages, question) {
-  const system = buildSystemWithFiles();
+async function chat(messages, question, mode = "auto") {
+  const system = buildSystemWithFiles(mode);
   messages.push({ role: "user", content: question });
 
   const MAX_TURNS = 15;
@@ -498,6 +526,90 @@ async function main() {
     assert(/timeout/i.test(r8.text) || /connection/i.test(r8.text), "found database timeout error");
     assert(/disk/i.test(r8.text) || /space/i.test(r8.text), "found disk space error");
     console.log(`  Response: ${r8.text.slice(0, 200)}...\n`);
+  }
+
+  // --- Test 9: Plan mode "on" — agent must propose_plan before editing ---
+  console.log("TEST 9: Plan mode on — agent proposes plan before editing (large file)");
+  clearFiles();
+  {
+    const filler = [];
+    for (let i = 1; i <= 3000; i++) filler.push(`line ${i}: server config parameter${i}=value${i}`);
+    filler[500] = "line 501: server config max_connections=100";
+    addFile("server.conf", filler.join("\n"));
+
+    const conv9 = [];
+    const r9 = await chat(conv9, 'Change max_connections from 100 to 200 in server.conf.', "on");
+
+    // check agent used propose_plan
+    const toolsUsed = [];
+    for (const msg of conv9) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const b of msg.content) {
+        if (b.type === "tool_use") toolsUsed.push(b.name);
+      }
+    }
+    assert(toolsUsed.includes("propose_plan"), `agent called propose_plan (tools: ${toolsUsed.join(", ")})`);
+    assert(toolsUsed.includes("str_replace"), `agent called str_replace after plan (tools: ${toolsUsed.join(", ")})`);
+
+    // verify propose_plan came before str_replace
+    const planIdx = toolsUsed.indexOf("propose_plan");
+    const editIdx = toolsUsed.indexOf("str_replace") !== -1 ? toolsUsed.indexOf("str_replace") : toolsUsed.indexOf("write_file");
+    assert(planIdx < editIdx, "propose_plan was called before write tool");
+
+    // verify the edit was applied
+    const updated = files["server.conf"];
+    assert(updated && /max_connections=200/.test(updated), "max_connections updated to 200");
+    console.log(`  Tools used: ${toolsUsed.join(" → ")}`);
+    console.log(`  Response: ${r9.text.slice(0, 150)}...\n`);
+  }
+
+  // --- Test 10: Plan mode "auto" — simple question skips plan ---
+  console.log("TEST 10: Plan mode auto — simple question answered directly");
+  clearFiles();
+  {
+    addFile("readme.txt", "Project: Widget Factory\nVersion: 2.4.1\nAuthor: Bob\n");
+
+    const conv10 = [];
+    const r10 = await chat(conv10, "What version is the Widget Factory project?", "auto");
+    assert(r10.text.length > 0, "got a text response");
+    assert(/2\.4\.1/.test(r10.text), "response includes version 2.4.1");
+
+    // check that propose_plan was NOT called (simple question)
+    const toolsUsed = [];
+    for (const msg of conv10) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const b of msg.content) {
+        if (b.type === "tool_use") toolsUsed.push(b.name);
+      }
+    }
+    assert(!toolsUsed.includes("propose_plan"), `no propose_plan for simple question (tools: ${toolsUsed.join(", ") || "none"})`);
+    console.log(`  Tools used: ${toolsUsed.join(" → ") || "(none)"}`);
+    console.log(`  Response: ${r10.text.slice(0, 150)}...\n`);
+  }
+
+  // --- Test 11: Plan mode "off" — edit without plan ---
+  console.log("TEST 11: Plan mode off — direct edit without plan");
+  clearFiles();
+  {
+    addFile("config.yml", "database:\n  host: localhost\n  port: 3306\n");
+
+    const conv11 = [];
+    const r11 = await chat(conv11, 'Change the database port to 5432 in config.yml.', "off");
+
+    const toolsUsed = [];
+    for (const msg of conv11) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const b of msg.content) {
+        if (b.type === "tool_use") toolsUsed.push(b.name);
+      }
+    }
+    assert(!toolsUsed.includes("propose_plan"), `no propose_plan in off mode (tools: ${toolsUsed.join(", ")})`);
+    assert(toolsUsed.includes("str_replace") || toolsUsed.includes("write_file"), `used write tool directly (tools: ${toolsUsed.join(", ")})`);
+
+    const updated = files["config.yml"];
+    assert(updated && /5432/.test(updated), "port updated to 5432");
+    console.log(`  Tools used: ${toolsUsed.join(" → ")}`);
+    console.log(`  Response: ${r11.text.slice(0, 150)}...\n`);
   }
 
   // --- summary ---
