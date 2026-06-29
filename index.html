@@ -122,6 +122,12 @@
   #input:focus { outline: none; border-color: var(--accent-dim); }
   #input::placeholder { color: var(--dim); }
   .hint { color: var(--dim); font-size: 11.5px; padding: 0 16px 8px; }
+  .hint button {
+    font-family: var(--mono); font-size: 11.5px; padding: 1px 6px;
+    background: transparent; border: 1px solid var(--line); border-radius: 4px;
+    color: var(--user); cursor: pointer;
+  }
+  .hint button:hover { border-color: var(--user); }
 
   /* write confirmation card */
   .confirm {
@@ -239,8 +245,6 @@
     <span class="grow"></span>
     <button id="compressBtn">compress</button>
     <button id="addBtn">+ add files</button>
-    <button id="planBtn" title="plan mode: agent proposes changes before editing (shift+tab to cycle)">plan: auto</button>
-    <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button>
     <button id="logBtn">↓ log</button>
     <button id="tokenBtn">set token</button>
     <button id="wipeBtn">clear all</button>
@@ -251,7 +255,7 @@
 
   <div id="log" aria-live="polite"></div>
 
-  <div class="hint">commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask the agent to edit a file</div>
+  <div class="hint"><button id="planBtn" title="plan mode: agent proposes changes before editing (shift+tab to cycle)">plan: auto</button> · <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button> · commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask the agent to edit a file</div>
 
   <footer>
     <input id="input" autocomplete="off" placeholder="ask a question, or type a command…" autofocus>
