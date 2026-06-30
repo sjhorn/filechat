@@ -709,6 +709,17 @@ const TOOLS = [
       },
       required: ["summary", "steps"]
     }
+  },
+  {
+    name: "web_search",
+    description: "Search the web for current information. Returns a summary of results. Only the search query is sent externally — no file contents are shared. Use for current events, documentation, or facts not in the user's files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query (keep it short and specific)" }
+      },
+      required: ["query"]
+    }
   }
 ];
 
@@ -1011,6 +1022,32 @@ async function executeTool(name, input) {
     return result;
   }
 
+  if (name === "web_search") {
+    try {
+      const q = input.query;
+      printHTML(`<span class="sys">web_search → "${escapeHTML(q)}"</span>`, "sys");
+      const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`;
+      const res = await fetch(url);
+      const data = await res.json();
+      let result = "";
+      if (data.AbstractText) result += `Summary: ${data.AbstractText}\nSource: ${data.AbstractURL}\n\n`;
+      if (data.Answer) result += `Answer: ${data.Answer}\n\n`;
+      if (data.RelatedTopics?.length) {
+        result += "Related:\n";
+        for (const t of data.RelatedTopics.slice(0, 8)) {
+          if (t.Text) result += `- ${t.Text}\n`;
+          if (t.Topics) for (const sub of t.Topics.slice(0, 3)) {
+            if (sub.Text) result += `  - ${sub.Text}\n`;
+          }
+        }
+      }
+      if (!result.trim()) result = `No instant results for "${q}". Try rephrasing or being more specific.`;
+      return result;
+    } catch (e) {
+      return `Search error: ${e.message}`;
+    }
+  }
+
   /* ---- write tools (need preview + confirmation) ---- */
 
   // hard gate: in plan mode "on", block writes until a plan is approved
@@ -1172,7 +1209,8 @@ async function buildSystem() {
   let sys;
   const TONE = "\n\nTone: Be concise and direct. Keep answers under 150 words unless the user asks for more detail. "
     + "Never use filler phrases like \"Great question\", \"Certainly!\", \"Absolutely!\", \"Of course!\", or similar. "
-    + "Get straight to the answer. If a longer explanation might help, give the short version first and offer to elaborate.";
+    + "Get straight to the answer. If a longer explanation might help, give the short version first and offer to elaborate.\n"
+    + "You have web_search for looking up current information, documentation, or facts not in the user's files. Keep search queries short and specific.";
 
   if (useInline) {
     sys = "You are a helpful assistant working with the user's files in a browser-based store. "

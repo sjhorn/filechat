@@ -112,6 +112,17 @@ const TOOLS = [
       required: ["summary", "steps"],
     },
   },
+  {
+    name: "web_search",
+    description: "Search the web for current information. Only the search query is sent externally.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+      },
+      required: ["query"],
+    },
+  },
 ];
 
 const SYSTEM_INLINE =
@@ -254,6 +265,10 @@ function executeToolCall(name, input) {
   if (name === "propose_plan") {
     // auto-approve plans in tests
     return "Plan approved. Execute the changes now.";
+  }
+  if (name === "web_search") {
+    // mock search results in tests
+    return `Summary: Mock search result for "${input.query}"\nSource: https://example.com\n\nRelated:\n- Result 1 for ${input.query}\n- Result 2 for ${input.query}`;
   }
   return `Error: unknown tool: ${name}`;
 }
