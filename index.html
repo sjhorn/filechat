@@ -98,6 +98,18 @@
     border-left: 3px solid var(--accent-dim); margin: 0 0 8px;
     padding: 2px 0 2px 12px; color: var(--dim);
   }
+  .md del { opacity: .6; text-decoration: line-through; }
+  .md hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
+  .md .md-tasklist { list-style: none; padding-left: 6px; }
+  .md .md-tasklist input { margin-right: 6px; vertical-align: middle; }
+  .md .md-table {
+    border-collapse: collapse; margin: 0 0 8px; font-size: .92em; width: auto;
+  }
+  .md .md-table th, .md .md-table td {
+    border: 1px solid var(--line); padding: 4px 10px; text-align: left;
+  }
+  .md .md-table th { color: var(--user); font-weight: 600; background: var(--panel); }
+  .md .md-table td { color: var(--ink); }
   .file-list { color: var(--ink); }
   .file-list b { color: var(--user); font-weight: 600; }
   .thinking { color: var(--dim); font-style: italic; }
@@ -440,7 +452,7 @@ rm <file>        remove a file
 help             this message
 
 Conversation is auto-saved to memory.md after each exchange.
-Auto-compresses at 80% of 256k context, or click "compress" manually.
+Auto-compresses at 80% of 750k context, or click "compress" manually.
 
 Anything that isn't a command is sent to the agent as a question,
 with the contents of your files included as context.`, "sys");
@@ -516,21 +528,60 @@ function renderMarkdown(src) {
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
     .replace(/\b_([^_]+)_\b/g, "<em>$1</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
              '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 
   // 4. block-level pass, line by line
   const lines = src.split("\n");
-  let html = "", listType = null;
+  let html = "", listType = null, inTable = false;
   const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
+  const closeTable = () => { if (inTable) { html += "</tbody></table>"; inTable = false; } };
+  const closeAll = () => { closeList(); closeTable(); };
 
-  for (let raw of lines) {
-    const line = raw;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     let m;
-    if (/^\u0000BLOCK\d+\u0000$/.test(line.trim())) { closeList(); html += line.trim(); continue; }
+    if (/^\u0000BLOCK\d+\u0000$/.test(line.trim())) { closeAll(); html += line.trim(); continue; }
+
+    // table: line with pipes, and next line is a separator (or we're already in a table)
+    if (/^\s*\|/.test(line) && line.includes("|")) {
+      const cells = line.split("|").slice(1); // drop leading empty
+      if (cells.length && cells[cells.length - 1].trim() === "") cells.pop(); // drop trailing empty
+      const isSep = /^\s*\|?[\s|:-]+\|?\s*$/.test(line) && /---/.test(line);
+      if (isSep) continue; // skip separator row
+      if (!inTable) {
+        closeList();
+        // check if next line is a separator — if so this is a header row
+        const nextLine = i + 1 < lines.length ? lines[i + 1] : "";
+        const nextIsSep = /^\s*\|?[\s|:-]+\|?\s*$/.test(nextLine) && /---/.test(nextLine);
+        html += '<table class="md-table">';
+        if (nextIsSep) {
+          html += "<thead><tr>" + cells.map(c => `<th>${inline(c.trim())}</th>`).join("") + "</tr></thead><tbody>";
+          i++; // skip the separator line
+        } else {
+          html += "<tbody><tr>" + cells.map(c => `<td>${inline(c.trim())}</td>`).join("") + "</tr>";
+        }
+        inTable = true;
+      } else {
+        html += "<tr>" + cells.map(c => `<td>${inline(c.trim())}</td>`).join("") + "</tr>";
+      }
+      continue;
+    }
+
+    closeTable();
+
     if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
       closeList(); const lvl = m[1].length;
       html += `<h${lvl} class="md-h">${inline(m[2])}</h${lvl}>`; continue;
+    }
+    if (/^\s*[-*_]{3,}\s*$/.test(line) && !/^\s*[-*+]\s+/.test(line)) {
+      closeList(); html += "<hr>"; continue;
+    }
+    if ((m = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/))) {
+      if (listType !== "ul") { closeList(); html += '<ul class="md-list md-tasklist">'; listType = "ul"; }
+      const checked = m[1] !== " " ? " checked disabled" : " disabled";
+      html += `<li><input type="checkbox"${checked}> ${inline(m[2])}</li>`; continue;
     }
     if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
       if (listType !== "ul") { closeList(); html += '<ul class="md-list">'; listType = "ul"; }
@@ -547,7 +598,7 @@ function renderMarkdown(src) {
     closeList();
     html += `<p class="md-p">${inline(line)}</p>`;
   }
-  closeList();
+  closeAll();
 
   // 5. restore code blocks
   html = html.replace(/\u0000BLOCK(\d+)\u0000/g, (_, i) => blocks[+i]);
@@ -981,7 +1032,7 @@ async function executeTool(name, input) {
 /* ---------- conversation memory ---------- */
 const MEMORY_FILE = "memory.md";
 const conversation = []; // persistent conversation history
-const CONTEXT_LIMIT = 256_000;     // model context window in tokens
+const CONTEXT_LIMIT = 750_000;     // model context window in tokens
 const COMPRESS_AT = Math.floor(CONTEXT_LIMIT * 0.8); // 204,800 tokens
 let lastInputTokens = 0;           // updated after each API call
 const debugLog = [];                // raw API request/response log
@@ -1089,13 +1140,17 @@ async function buildSystem() {
   const useInline = totalChars > 0 && totalChars <= INLINE_THRESHOLD;
 
   let sys;
+  const TONE = "\n\nTone: Be concise and direct. Keep answers under 150 words unless the user asks for more detail. "
+    + "Never use filler phrases like \"Great question\", \"Certainly!\", \"Absolutely!\", \"Of course!\", or similar. "
+    + "Get straight to the answer. If a longer explanation might help, give the short version first and offer to elaborate.";
+
   if (useInline) {
     sys = "You are a helpful assistant working with the user's files in a browser-based store. "
       + "Answer questions from the file contents, and cite file names when relevant. "
       + "When the user asks you to change a file, use the write_file or str_replace tools immediately — "
       + "do NOT just describe what you would change; call the tool right away. "
       + "Prefer str_replace for small targeted edits. After editing, briefly say what you changed. "
-      + "Edits are applied to the user's local browser storage only.";
+      + "Edits are applied to the user's local browser storage only." + TONE;
   } else {
     sys = "You are a helpful assistant working with the user's files in a browser-based store. "
       + "File contents are NOT pre-loaded — treat the file store as external memory and query it on demand.\n\n"
@@ -1106,7 +1161,7 @@ async function buildSystem() {
       + "4. To edit: grep/read to locate the target, then str_replace for surgical edits or write_file for full rewrites.\n\n"
       + "Keep your working context lean — read only what's relevant to the question. "
       + "Cite file names and line numbers when discussing content. "
-      + "Edits are applied to the user's local browser storage only.";
+      + "Edits are applied to the user's local browser storage only." + TONE;
   }
 
   // plan mode instructions
