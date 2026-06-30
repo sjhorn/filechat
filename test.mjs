@@ -267,8 +267,8 @@ function executeToolCall(name, input) {
     return "Plan approved. Execute the changes now.";
   }
   if (name === "web_search") {
-    // mock search results in tests
-    return `Summary: Mock search result for "${input.query}"\nSource: https://example.com\n\nRelated:\n- Result 1 for ${input.query}\n- Result 2 for ${input.query}`;
+    // mock Serper-style results in tests
+    return `Mock Result (knowledge graph)\nMock description for "${input.query}"\n\nResults:\n- Result 1 for ${input.query}\n  Snippet about ${input.query}\n  https://example.com/1\n- Result 2 for ${input.query}\n  Another snippet\n  https://example.com/2`;
   }
   return `Error: unknown tool: ${name}`;
 }

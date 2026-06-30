@@ -266,6 +266,7 @@
     <button id="addBtn">+ add files</button>
     <button id="logBtn">↓ log</button>
     <button id="tokenBtn">set token</button>
+    <button id="serperBtn">search key</button>
     <button id="wipeBtn">clear all</button>
     <input type="file" id="picker" multiple hidden>
   </header>
@@ -329,6 +330,15 @@ function getToken(force) {
     if (t) localStorage.setItem("apiToken", t.trim());
   }
   return localStorage.getItem("apiToken");
+}
+
+function getSerperKey(force) {
+  let k = localStorage.getItem("serperKey");
+  if (!k || force) {
+    k = prompt("Enter your Serper API key for web search (free at serper.dev, stored only in this browser):", k || "");
+    if (k) localStorage.setItem("serperKey", k.trim());
+  }
+  return localStorage.getItem("serperKey");
 }
 
 /* ---------- log helpers ---------- */
@@ -1023,25 +1033,37 @@ async function executeTool(name, input) {
   }
 
   if (name === "web_search") {
+    const key = getSerperKey();
+    if (!key) return "Error: no Serper API key set. The user needs to click 'search key' to enter one.";
     try {
       const q = input.query;
       printHTML(`<span class="sys">web_search → "${escapeHTML(q)}"</span>`, "sys");
-      const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`;
-      const res = await fetch(url);
+      const res = await fetch("https://google.serper.dev/search", {
+        method: "POST",
+        headers: { "X-API-KEY": key, "Content-Type": "application/json" },
+        body: JSON.stringify({ q })
+      });
+      if (!res.ok) return `Search error: ${res.status} ${res.statusText}`;
       const data = await res.json();
       let result = "";
-      if (data.AbstractText) result += `Summary: ${data.AbstractText}\nSource: ${data.AbstractURL}\n\n`;
-      if (data.Answer) result += `Answer: ${data.Answer}\n\n`;
-      if (data.RelatedTopics?.length) {
-        result += "Related:\n";
-        for (const t of data.RelatedTopics.slice(0, 8)) {
-          if (t.Text) result += `- ${t.Text}\n`;
-          if (t.Topics) for (const sub of t.Topics.slice(0, 3)) {
-            if (sub.Text) result += `  - ${sub.Text}\n`;
-          }
+      if (data.knowledgeGraph) {
+        const kg = data.knowledgeGraph;
+        result += `${kg.title}`;
+        if (kg.type) result += ` (${kg.type})`;
+        result += "\n";
+        if (kg.description) result += `${kg.description}\n`;
+        if (kg.attributes) {
+          for (const [k, v] of Object.entries(kg.attributes)) result += `  ${k}: ${v}\n`;
+        }
+        result += "\n";
+      }
+      if (data.organic?.length) {
+        result += "Results:\n";
+        for (const r of data.organic.slice(0, 5)) {
+          result += `- ${r.title}\n  ${r.snippet}\n  ${r.link}\n`;
         }
       }
-      if (!result.trim()) result = `No instant results for "${q}". Try rephrasing or being more specific.`;
+      if (!result.trim()) result = `No results for "${q}".`;
       return result;
     } catch (e) {
       return `Search error: ${e.message}`;
@@ -1429,6 +1451,10 @@ document.getElementById("tokenBtn").onclick = () => {
   getToken(true);
   print(localStorage.getItem("apiToken") ? "token saved in this browser" : "no token set", "sys");
 };
+document.getElementById("serperBtn").onclick = () => {
+  getSerperKey(true);
+  print(localStorage.getItem("serperKey") ? "search key saved in this browser" : "no search key set", "sys");
+};
 document.getElementById("logBtn").onclick = () => {
   if (!debugLog.length) { print("no API calls logged yet", "sys"); return; }
   const text = JSON.stringify(debugLog, null, 2);
@@ -1439,6 +1465,7 @@ document.getElementById("wipeBtn").onclick = async () => {
   if (!confirm("Clear all stored files AND the API token from this browser?")) return;
   await DB.clear();
   localStorage.removeItem("apiToken");
+  localStorage.removeItem("serperKey");
   conversation.length = 0;
   debugLog.length = 0;
   log.innerHTML = "";
