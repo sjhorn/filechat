@@ -1155,10 +1155,20 @@ async function executeTool(name, input) {
 }
 
 /* ---------- token display ---------- */
+// Sonnet 4.6 pricing per million tokens (USD)
+const PRICING = { input: 3.00, cache_read: 0.30, cache_create: 3.75, output: 15.00 };
+let sessionCost = 0; // cumulative session cost in USD
+
 function fmtTokens(n) {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return (n / 1000).toFixed(1) + "k";
   return (n / 1_000_000).toFixed(2) + "M";
+}
+
+function fmtCost(usd) {
+  if (usd < 0.01) return "$" + usd.toFixed(4);
+  if (usd < 1) return "$" + usd.toFixed(3);
+  return "$" + usd.toFixed(2);
 }
 
 function updateTokenBar(usage) {
@@ -1167,13 +1177,24 @@ function updateTokenBar(usage) {
   const inp = usage.input_tokens || 0;
   const out = usage.output_tokens || 0;
   const cached = usage.cache_read_input_tokens || 0;
+  const cacheCreate = usage.cache_creation_input_tokens || 0;
   const pct = Math.round(inp / CONTEXT_LIMIT * 100);
+
+  // estimate cost for this call
+  const callCost =
+    (inp * PRICING.input +
+     cached * PRICING.cache_read +
+     cacheCreate * PRICING.cache_create +
+     out * PRICING.output) / 1_000_000;
+  sessionCost += callCost;
+
   const cachePart = cached ? ` <span class="tok flash" title="cached tokens">⚡${fmtTokens(cached)}</span>` : "";
   bar.innerHTML =
     `ctx: ${pct}% · `
     + `<span class="tok flash">↑${fmtTokens(inp)}</span> `
     + `<span class="tok flash">↓${fmtTokens(out)}</span>`
-    + cachePart;
+    + cachePart
+    + ` · <span class="tok flash" title="estimated session cost (Sonnet 4.6 pricing)">${fmtCost(sessionCost)}</span>`;
   // re-trigger animation
   bar.querySelectorAll(".tok").forEach(el => {
     el.addEventListener("animationend", () => el.classList.remove("flash"), { once: true });
@@ -1532,6 +1553,7 @@ document.getElementById("wipeBtn").onclick = async () => {
   localStorage.removeItem("serperKey");
   conversation.length = 0;
   debugLog.length = 0;
+  sessionCost = 0;
   log.innerHTML = "";
   await refreshStat();
   print("cleared all files, token, and conversation history", "sys");
