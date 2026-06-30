@@ -140,6 +140,13 @@
     color: var(--user); cursor: pointer;
   }
   .hint button:hover { border-color: var(--user); }
+  .token-bar { white-space: nowrap; }
+  .token-bar .tok { display: inline-block; transition: opacity .3s; }
+  .token-bar .tok.flash { animation: tokFlash .6s ease; }
+  @keyframes tokFlash {
+    0% { color: var(--accent); opacity: 1; }
+    100% { color: var(--dim); opacity: 1; }
+  }
 
   /* write confirmation card */
   .confirm {
@@ -267,7 +274,7 @@
 
   <div id="log" aria-live="polite"></div>
 
-  <div class="hint"><button id="planBtn" title="plan mode: agent proposes changes before editing (shift+tab to cycle)">plan: auto</button> · <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button> · commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask the agent to edit a file</div>
+  <div class="hint"><button id="planBtn" title="plan mode: agent proposes changes before editing (shift+tab to cycle)">plan: auto</button> · <button id="autoBtn" title="when on, agent edits apply without asking">confirm edits: on</button> · <span id="tokenBar" class="token-bar">ctx: –</span> · commands: <b>ls</b> · <b>cat &lt;file&gt;</b> · <b>search &lt;term&gt;</b> · <b>rm &lt;file&gt;</b> · <b>help</b> — or ask a question, or ask the agent to edit a file</div>
 
   <footer>
     <input id="input" autocomplete="off" placeholder="ask a question, or type a command…" autofocus>
@@ -1029,6 +1036,29 @@ async function executeTool(name, input) {
   }
 }
 
+/* ---------- token display ---------- */
+function fmtTokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return (n / 1000).toFixed(1) + "k";
+  return (n / 1_000_000).toFixed(2) + "M";
+}
+
+function updateTokenBar(usage) {
+  const bar = document.getElementById("tokenBar");
+  if (!usage) return;
+  const inp = usage.input_tokens || 0;
+  const out = usage.output_tokens || 0;
+  const pct = Math.round(inp / CONTEXT_LIMIT * 100);
+  bar.innerHTML =
+    `ctx: ${pct}% · `
+    + `<span class="tok flash">↑${fmtTokens(inp)}</span> `
+    + `<span class="tok flash">↓${fmtTokens(out)}</span>`;
+  // re-trigger animation
+  bar.querySelectorAll(".tok").forEach(el => {
+    el.addEventListener("animationend", () => el.classList.remove("flash"), { once: true });
+  });
+}
+
 /* ---------- conversation memory ---------- */
 const MEMORY_FILE = "memory.md";
 const conversation = []; // persistent conversation history
@@ -1282,7 +1312,10 @@ async function askClaude(question) {
     conversation.push({ role: "assistant", content: data.content });
 
     // track token usage
-    if (data.usage) lastInputTokens = data.usage.input_tokens || 0;
+    if (data.usage) {
+      lastInputTokens = data.usage.input_tokens || 0;
+      updateTokenBar(data.usage);
+    }
 
     const toolCalls = (data.content || []).filter(b => b.type === "tool_use");
     if (data.stop_reason !== "tool_use" || !toolCalls.length) {
