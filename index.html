@@ -84,6 +84,7 @@
   .md ol.md-list { list-style-type: decimal; }
   .md ul.md-list { list-style-type: disc; }
   .md .md-list li { margin: 2px 0; }
+  .md .md-list .md-list { margin: 2px 0 2px 0; }
   .md strong { color: #e6edf3; font-weight: 600; }
   .md em { font-style: italic; }
   .md code.inline {
@@ -551,12 +552,20 @@ function renderMarkdown(src) {
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
              '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 
-  // 4. block-level pass, line by line
+  // 4. block-level pass, line by line (with nested list support)
   const lines = src.split("\n");
-  let html = "", listType = null, inTable = false;
-  const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
+  let html = "", inTable = false;
+  // listStack tracks nested lists: [{type:"ol"|"ul", indent:0}]
+  const listStack = [];
+  const listIndent = (line) => { const m = line.match(/^(\s*)/); return m ? m[1].length : 0; };
+  const closeListsTo = (targetDepth) => {
+    while (listStack.length > targetDepth) {
+      html += `</li></${listStack.pop().type}>`;
+    }
+  };
+  const closeAllLists = () => { closeListsTo(0); };
   const closeTable = () => { if (inTable) { html += "</tbody></table>"; inTable = false; } };
-  const closeAll = () => { closeList(); closeTable(); };
+  const closeAll = () => { closeAllLists(); closeTable(); };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -565,19 +574,18 @@ function renderMarkdown(src) {
 
     // table: line with pipes, and next line is a separator (or we're already in a table)
     if (/^\s*\|/.test(line) && line.includes("|")) {
-      const cells = line.split("|").slice(1); // drop leading empty
-      if (cells.length && cells[cells.length - 1].trim() === "") cells.pop(); // drop trailing empty
+      const cells = line.split("|").slice(1);
+      if (cells.length && cells[cells.length - 1].trim() === "") cells.pop();
       const isSep = /^\s*\|?[\s|:-]+\|?\s*$/.test(line) && /---/.test(line);
-      if (isSep) continue; // skip separator row
+      if (isSep) continue;
       if (!inTable) {
-        closeList();
-        // check if next line is a separator — if so this is a header row
+        closeAllLists();
         const nextLine = i + 1 < lines.length ? lines[i + 1] : "";
         const nextIsSep = /^\s*\|?[\s|:-]+\|?\s*$/.test(nextLine) && /---/.test(nextLine);
         html += '<table class="md-table">';
         if (nextIsSep) {
           html += "<thead><tr>" + cells.map(c => `<th>${inline(c.trim())}</th>`).join("") + "</tr></thead><tbody>";
-          i++; // skip the separator line
+          i++;
         } else {
           html += "<tbody><tr>" + cells.map(c => `<td>${inline(c.trim())}</td>`).join("") + "</tr>";
         }
@@ -591,30 +599,73 @@ function renderMarkdown(src) {
     closeTable();
 
     if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
-      closeList(); const lvl = m[1].length;
+      closeAllLists(); const lvl = m[1].length;
       html += `<h${lvl} class="md-h">${inline(m[2])}</h${lvl}>`; continue;
     }
     if (/^\s*[-*_]{3,}\s*$/.test(line) && !/^\s*[-*+]\s+/.test(line)) {
-      closeList(); html += "<hr>"; continue;
+      closeAllLists(); html += "<hr>"; continue;
     }
-    if ((m = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/))) {
-      if (listType !== "ul") { closeList(); html += '<ul class="md-list md-tasklist">'; listType = "ul"; }
-      const checked = m[1] !== " " ? " checked disabled" : " disabled";
-      html += `<li><input type="checkbox"${checked}> ${inline(m[2])}</li>`; continue;
+
+    // detect list items (ordered, unordered, task)
+    let listMatch = null;
+    let itemType = null;
+    let itemContent = "";
+    if ((m = line.match(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$/))) {
+      itemType = "ul"; itemContent = (() => { const ck = m[2] !== " " ? " checked disabled" : " disabled"; return `<input type="checkbox"${ck}> ${inline(m[3])}`; })();
+      listMatch = { indent: m[1].length, type: "ul", cls: "md-list md-tasklist" };
+    } else if ((m = line.match(/^(\s*)[-*+]\s+(.*)$/))) {
+      itemType = "ul"; itemContent = inline(m[2]);
+      listMatch = { indent: m[1].length, type: "ul", cls: "md-list" };
+    } else if ((m = line.match(/^(\s*)\d+\.\s+(.*)$/))) {
+      itemType = "ol"; itemContent = inline(m[2]);
+      listMatch = { indent: m[1].length, type: "ol", cls: "md-list" };
     }
-    if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
-      if (listType !== "ul") { closeList(); html += '<ul class="md-list">'; listType = "ul"; }
-      html += `<li>${inline(m[1])}</li>`; continue;
+
+    if (listMatch) {
+      const indent = listMatch.indent;
+      if (!listStack.length) {
+        // start a new top-level list
+        html += `<${listMatch.type} class="${listMatch.cls}"><li>${itemContent}`;
+        listStack.push({ type: listMatch.type, indent });
+      } else {
+        const top = listStack[listStack.length - 1];
+        if (indent > top.indent) {
+          // nested: open a sub-list inside the current <li>
+          html += `<${listMatch.type} class="${listMatch.cls}"><li>${itemContent}`;
+          listStack.push({ type: listMatch.type, indent });
+        } else if (indent < top.indent) {
+          // un-nesting: close deeper lists
+          while (listStack.length > 1 && listStack[listStack.length - 1].indent > indent) {
+            html += `</li></${listStack.pop().type}>`;
+          }
+          html += `</li><li>${itemContent}`;
+        } else {
+          // same level
+          if (top.type === listMatch.type) {
+            html += `</li><li>${itemContent}`;
+          } else {
+            // switching list type at same level
+            html += `</li></${top.type}><${listMatch.type} class="${listMatch.cls}"><li>${itemContent}`;
+            listStack[listStack.length - 1] = { type: listMatch.type, indent };
+          }
+        }
+      }
+      continue;
     }
-    if ((m = line.match(/^\s*\d+\.\s+(.*)$/))) {
-      if (listType !== "ol") { closeList(); html += '<ol class="md-list">'; listType = "ol"; }
-      html += `<li>${inline(m[1])}</li>`; continue;
-    }
+
     if ((m = line.match(/^\s*&gt;\s?(.*)$/))) {
-      closeList(); html += `<blockquote>${inline(m[1])}</blockquote>`; continue;
+      closeAllLists(); html += `<blockquote>${inline(m[1])}</blockquote>`; continue;
     }
-    if (line.trim() === "") { closeList(); continue; }
-    closeList();
+    if (line.trim() === "") {
+      // don't close lists on blank lines if the next non-blank line continues the list
+      if (listStack.length) {
+        let j = i + 1;
+        while (j < lines.length && lines[j].trim() === "") j++;
+        if (j < lines.length && /^\s*(\d+\.\s+|[-*+]\s+)/.test(lines[j])) continue; // list continues
+      }
+      closeAllLists(); continue;
+    }
+    closeAllLists();
     html += `<p class="md-p">${inline(line)}</p>`;
   }
   closeAll();
