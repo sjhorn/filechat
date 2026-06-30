@@ -469,7 +469,7 @@ rm <file>        remove a file
 help             this message
 
 Conversation is auto-saved to memory.md after each exchange.
-Auto-compresses at 80% of 750k context, or click "compress" manually.
+Auto-compresses at 60% of 750k context, or click "compress" manually.
 
 Anything that isn't a command is sent to the agent as a question,
 with the contents of your files included as context.`, "sys");
@@ -1022,7 +1022,12 @@ async function executeTool(name, input) {
     printHTML(`<span class="sys">grep_files → "${escapeHTML(input.pattern)}" across ${fileCount} file(s) → ${matchCount} match(es)</span>`, "sys");
     if (!matchCount) return `No matches found for "${input.pattern}"`;
     let result = output.join("\n");
-    if (matchCount >= MAX_MATCHES) result += `\n\n(showing first ${MAX_MATCHES} matches, more may exist)`;
+    const MAX_CHARS = 8000;
+    if (result.length > MAX_CHARS) {
+      result = result.slice(0, MAX_CHARS) + `\n\n(output truncated at ${MAX_CHARS} chars — ${matchCount} matches found, refine your pattern or search a specific file)`;
+    } else if (matchCount >= MAX_MATCHES) {
+      result += `\n\n(showing first ${MAX_MATCHES} matches, more may exist)`;
+    }
     return result;
   }
 
@@ -1064,6 +1069,7 @@ async function executeTool(name, input) {
         }
       }
       if (!result.trim()) result = `No results for "${q}".`;
+      if (result.length > 3000) result = result.slice(0, 3000) + "\n\n(results truncated)";
       return result;
     } catch (e) {
       return `Search error: ${e.message}`;
@@ -1107,11 +1113,14 @@ function updateTokenBar(usage) {
   if (!usage) return;
   const inp = usage.input_tokens || 0;
   const out = usage.output_tokens || 0;
+  const cached = usage.cache_read_input_tokens || 0;
   const pct = Math.round(inp / CONTEXT_LIMIT * 100);
+  const cachePart = cached ? ` <span class="tok flash" title="cached tokens">⚡${fmtTokens(cached)}</span>` : "";
   bar.innerHTML =
     `ctx: ${pct}% · `
     + `<span class="tok flash">↑${fmtTokens(inp)}</span> `
-    + `<span class="tok flash">↓${fmtTokens(out)}</span>`;
+    + `<span class="tok flash">↓${fmtTokens(out)}</span>`
+    + cachePart;
   // re-trigger animation
   bar.querySelectorAll(".tok").forEach(el => {
     el.addEventListener("animationend", () => el.classList.remove("flash"), { once: true });
@@ -1122,7 +1131,7 @@ function updateTokenBar(usage) {
 const MEMORY_FILE = "memory.md";
 const conversation = []; // persistent conversation history
 const CONTEXT_LIMIT = 750_000;     // model context window in tokens
-const COMPRESS_AT = Math.floor(CONTEXT_LIMIT * 0.8); // 204,800 tokens
+const COMPRESS_AT = Math.floor(CONTEXT_LIMIT * 0.6); // compress earlier to save tokens
 let lastInputTokens = 0;           // updated after each API call
 const debugLog = [];                // raw API request/response log
 
@@ -1172,7 +1181,7 @@ async function compressConversation() {
         "Authorization": "Bearer " + token
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 800,
         system: "Summarize the conversation so far into a concise recap (under 500 words). "
           + "Cover: what files were discussed, what was changed, key decisions, and any open questions. "
@@ -1232,6 +1241,8 @@ async function buildSystem() {
   const TONE = "\n\nTone: Be concise and direct. Keep answers under 150 words unless the user asks for more detail. "
     + "Never use filler phrases like \"Great question\", \"Certainly!\", \"Absolutely!\", \"Of course!\", or similar. "
     + "Get straight to the answer. If a longer explanation might help, give the short version first and offer to elaborate.\n"
+    + "Never restate code, file contents, or tool output already in this conversation — reference by file name and line number instead. "
+    + "After a tool call succeeds, continue without narrating the result.\n"
     + "You have web_search for looking up current information, documentation, or facts not in the user's files. Keep search queries short and specific.";
 
   if (useInline) {
@@ -1334,7 +1345,7 @@ async function askClaude(question) {
       const reqBody = {
         model: "claude-sonnet-4-6",
         max_tokens: 8192,
-        system,
+        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
         tools: TOOLS,
         messages: conversation
       };
